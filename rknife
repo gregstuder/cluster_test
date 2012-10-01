@@ -1,0 +1,12 @@
+#!/bin/bash
+
+INSTANCE=$1
+
+shift
+
+KEYFILE="`cat ./instances/$INSTANCE/keyfile`"
+USER="`cat ./instances/$INSTANCE/ec2_user`"
+HOST="`cat ./instances/$INSTANCE/host`"
+
+ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "$KEYFILE" -A $USER@$HOST "knife $@"
+

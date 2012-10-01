@@ -183,7 +183,7 @@ fi
 
 echo 
 echo "Run to connect to instance $INSTANCE_ID : "
-echo "ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "$SSH_KEYFILE" -t $EC2_USER@$HOST"
+echo "ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i \"$SSH_KEYFILE\" -A $EC2_USER@$HOST"
 echo 
 
 }

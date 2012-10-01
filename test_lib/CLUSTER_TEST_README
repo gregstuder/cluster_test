@@ -1,0 +1,198 @@
+Author: Siyuan Zhou (siyuan.zhou@10gen.com)
+Date: Aug. 9, 2012
+
+DESIGN
+=============
+1. Overview
+-----------
+The goal of cluster test framework is to make distributed cluster test easier.
+Usually before, one could do the following tasks manually to run a cluster
+test.
+
+1) Provisioning. Start/terminate instances on Amazon Web Service.
+2) Staging. Set up the test environment.
+3) Launching. Run the test.
+4) Monitoring. Restart processes if necessary; run mongostat/MMS for MongoDB.
+5) Log Aggregating. Gather log files and outputs from all processes.
+6) Cleaning up. Reset test environment for next test.
+
+By providing all these functionalities and giving users a high level abstract
+DSL and a interactive console, cluster test framework enable users to focus on
+the test design and getting things done.
+
+The framework consists of two components: console as a client and process
+manager as an agent.
+
+
+2. Process Manager
+------------------
+Process managers are running on every remote machine and waiting for commands
+from console. So far there are 3 kinds of commands:
++ run. Start a process and restart it when it crashes.
++ stop. Terminate a process.
++ shutdown. Terminate all processes and let process manager exit.
+
+Besides, a process manager monitors the processes that are running on that
+machine.
+
+3. Console
+----------
+When console starts, it reads and executes the DSL in command config. Then
+console provides a user interface to the whole framework.
+
+4. Phase
+--------
+Sometimes, we want define dependency and order between different commands. So
+every command comes with a phase that defines when the command will run. All
+commands in the same phase will be sent to process managers in parallel at the
+same time. But commands with greater phase will be sent only after small
+phases.
+
+Also, we need to run some functions locally in a test. For example, we need to
+initialize a replica set after starting mongods by using pymongo. So we
+introduce phase checker to do this kind of job. Phase checkers are registered
+by using AddPhaseChecker(). Basically a phase checker combines a function and a
+phase. After a phase is done, corresponding phase checkers function will run.
+They can do some configuration, check whether the test is running well or wait
+for an event like a specific socket is available to be used in next phase.
+
+For the pre-defined classes like Mongod, Replset and Cluster, internal phases
+and phase checkers are hidden from users. A user only need to give the start
+phase of Replset and Cluster, and framework will figure out the following
+phases and set the last_phase, so that users could define commands running
+after them.
+
+
+HOW TO USE
+=============
+1. Configurations
+-----------------
+All the config options that you can use in command config file are defined in
+console_config.py, and the command config will be executed in module
+console_config's run-time environment.
+
+Classes like ProcMgr and Mongod are used to design a test environment.
+
+Fuctions like KeyFile() provide ability to configure details of cluter test.
+
+provisioning.py contains the logic for provisioning on AWS.
+The access credentials can be passed in the constructor of provisioning.AWS,
+but it is recommended to store them in Evironment Variables.
+See http://boto.s3.amazonaws.com/s3_tut.html
+
+
+2. Run
+------
+The following instructions are about mature features of cluster test framework.
+
+2.1 Run console
+
+usage: console.py [-h] [-c COMMAND_CONFIG_FILE]
+
+Console for cluster test.
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -c COMMAND_CONFIG_FILE
+                        set command config file path (default=command_config)
+
+Example:
+1) python console.py -h
+
+Display above usage help.
+
+2) python -u console.py
+
+Use 'command_config' as the name of command config file. Python parameter '-u'
+is for no output buffering, since default behavior is line buffering.
+
+3) python -u console.py -c command_config_perf
+
+Run console with given command config file.
+
+2.2 Provisioning
+
+Once you start the console, it will read the command config and try to get the
+machines you need on AWS. Before creating new instances on AWS, it first checks
+EC2 whether there are existing machines that meet your demand. If there are, it
+probably means you are reconnecting to an existing cluster test, so just reuse
+them. If there are no existing instances, provisioning happens. It usually
+costs 1-2 minutes to start new instances.
+
+During the cluster test, the infomation of instances can be found on:
+http://cluster-test-metadata.s3.amazonaws.com/<test_name>
+e.g.
+http://cluster-test-metadata.s3.amazonaws.com/cluster_test
+
+Chances are that you have some existing instances running with the same test
+name defined in command config, 'cluster_test' for example, and provisioner
+finds they are unmatched with what you want. It probabaly means you are using
+an existing test name or just forgot to terminate old instances before changing
+test design. In this situation, an exception will be raised and provisioning
+will stop, you can fix afterward. See "Terminate" below.
+
+2.3 Set Up a Test Environment
+
+Next step is to set up test environment. It includes sending the binaries to
+remote machines and starting the process managers. After that, the process
+managers are ready to receive and run your commands.
+You can do that by:
+
+> setup
+
+2.4 Run Test
+
+> run
+
+This command will connect to remote process managers and send commands to them
+in phases given in command config. If you use Mongod, Cluster, etc. classes,
+they will figure out the right phases for you.
+
+When your commands are running on remote machines, it is safe to 'close'
+connection and 'exit'. Console will try to find those machines next time.
+
+2.5 Shutdown
+
+> shutdown
+
+'Shutdown' will kill all running processes and shutdown process managers. Next
+time you 'setup', you will have a clean working space, since 'setup' will
+delete all previous unneccesary files, like data files and logs.
+
+2.6 Terminate
+
+> terminate
+
+Terminate is the most dangerous command. It terminate all instances for current
+cluster test. And document on S3 is removed.
+
+2.7 Help
+
+> help
+
+Brief help document.
+
+
+3. Check List
+-------------
+
++ Put your binaries in BinPath and set BinPath.
+
++ Make sure aws_setup_host.sh is in the same directory with console.py. 
+  If you cloned the repository, it is already there.
+
++ Set LogPath (optional if you don't 'collect' log)
+
++ Make sure the AWS access credentials are in you evironment variables.
+
++ Set KeyFile and key_pair for AWS provisioner properly to your own SSH key.
+
++ Check the test name used for provisioner is unique, so that it couldn't 
+  mess others' tests.
+
+4. Python Package Dependency
+
++ pymongo
+
++ boto
+

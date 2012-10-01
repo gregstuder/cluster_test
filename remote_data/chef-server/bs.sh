@@ -56,71 +56,55 @@ echo " EC2 INSTANCE KEY : $SSH_KEYFILE"
 echo " EC2 INSTANCE KEY NAME : $EC2_KEY_NAME"
 echo
 
-echo "knife[:aws_ssh_key_id] = \"$EC2_KEY_NAME\"" >> .chef/knife.rb
-echo "knife[:aws_access_key_id] = \"$EC2_API_KEY\"" >> .chef/knife.rb
-echo "knife[:aws_secret_access_key] = \"$EC2_API_PRIVATE_KEY\"" >> .chef/knife.rb
+DEFAULT_USER="ubuntu"
+echo "User is : $USER / $DEFAULT_USER"
 
-exec ssh-agent bash
-ssh-add $SSH_KEYFILE
+usermod -a -G chef $DEFAULT_USER
+chmod g+r /etc/chef/validation.pem
+chmod g+r /etc/chef/webui.pem
 
+rm -f ./.chef/knife.rb
+su $DEFAULT_USER -c "knife configure --defaults -i -r \"\""
+
+#echo "chef_server_url          'http://`curl http://instance-data/latest/meta-data/hostname`:4000'" >> .chef/knife.rb
+echo "knife[:aws_ssh_key_id] = \"$EC2_KEY_NAME\"" >> ./.chef/knife.rb
+echo "knife[:aws_access_key_id] = \"$EC2_API_KEY\"" >> ./.chef/knife.rb
+echo "knife[:aws_secret_access_key] = \"$EC2_API_PRIVATE_KEY\"" >> ./.chef/knife.rb
+
+
+echo "if [ -f ~/.bashrc ]; then . ~/.bashrc; fi" >> ./.bash_profile
+echo "ssh-add $SSH_KEYFILE" >> ./.bashrc
+
+chown $DEFAULT_USER:$DEFAULT_USER ./.bash_profile
+chown $DEFAULT_USER:$DEFAULT_USER ./.bashrc
+
+# Install git for cookbooks
+
+apt-get install -y git
+
+#su $DEFAULT_USER -c "git clone git://github.com/opscode/chef-repo.git"
+
+echo "cookbook_path '/home/ubuntu/remote_data/chef-repo/cookbooks'" >> .chef/knife.rb
+
+for recipe in "getting-started" "chef-client" "mongodb"; do
+	su $DEFAULT_USER -c "knife cookbook site install $recipe"
+done
+
+# Upload all installed cookbooks
+su $DEFAULT_USER -c "knife cookbook upload -a"
+
+# Install all roles
+for role in `ls ./remote_data/chef-repo/roles/*.rb`; do
+        su $DEFAULT_USER -c "knife role from file $role"
+done
+
+echo "To login to chef server: "
+echo "http://`curl http://instance-data/latest/meta-data/public_hostname`:4040"
+
+echo "To start an example node with chef-client daemon:"
+echo " knife ec2 server create -I ami-b89842d1 -x ubuntu -Z us-east-1a"
+echo " knife node run_list add NODENAME 'recipe[chef-client]'"
+echo " knife ssh name:NODENAME -x ubuntu 'sudo chef-client'"
 
 exit
 
-#
-#
-#
-#
-
-
-
-# Install ruby and gem dependencies
-apt-get install -y ruby ruby-dev libopenssl-ruby rdoc ri irb build-essential wget ssl-cert curl
-
-mkdir ./ruby-tmp
-cd ./ruby-tmp
-
-curl -O http://production.cf.rubygems.org/rubygems/rubygems-1.8.10.tgz
-tar zxf rubygems-1.8.10.tgz
-cd rubygems-1.8.10
-ruby setup.rb --no-format-executable
-
-cd ../..
-rm -R ./ruby-tmp
-
-gem install chef --no-ri --no-rdoc
-
-# Setup and run chef-solo
-mkdir -p /etc/chef
-
-echo "\
-file_cache_path \"/tmp/chef-solo\"
-cookbook_path \"/tmp/chef-solo/cookbooks\"" | tee /etc/chef/solo.rb
-
-read -d '' CONFIG <<"EOF"
-{
-  "chef_server": {
-    "server_url": "http://localhost:4000"
-  },
-  "run_list": [ "recipe[chef-server::rubygems-install]" ]
-}
-EOF
-echo "$CONFIG" | tee chef.json
-
-chef-solo -c /etc/chef/solo.rb -j ~/chef.json -r http://s3.amazonaws.com/chef-solo/bootstrap-latest.tar.gz
-
-# Setup knife
-
-#mkdir -p ~/.chef
-#cp /etc/chef/validation.pem /etc/chef/webui.pem ~/.chef
-#chown -R $USER ~/.chef
-
-# Need to hit enter...
-knife configure -i
-
-# Install knife-ec2
-
-apt-get install -y ruby1.8-dev ruby1.8 ri1.8 rdoc1.8 irb1.8
-apt-get install -y libreadline-ruby1.8 libruby1.8 libopenssl-ruby
-apt-get install -y libxslt-dev libxml2-dev
-
-gem install knife-ec2 --no-rdoc --no-ri
