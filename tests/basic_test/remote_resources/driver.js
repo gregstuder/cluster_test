@@ -114,7 +114,7 @@ var getDocument = function(clientId, value)
     }
 
     doc._id = ObjectId();
-    doc.clientId = ObjectId();
+    doc.clientId = clientId;
     return doc;
 }
 
@@ -139,19 +139,11 @@ var rangeSize = function(range)
     return range[1] - range[0];
 }
 
-var getQuery = function(clientId, shardKeyMix, indexMix, range, sparsity)
+var addMixClauses = function(query, range, shardKeyMix, indexMix)
 {
-    range = toRange(range);
-    var sparsityClause = {$mod : [Math.pow(2, sparsity),
-                                  0]};
-
-    var rangeClause = sparsityClause;
-    rangeClause["$gte"] = range[0];
-    rangeClause["$lt"] = range[1];
-
-    query = {}
-    query.clientId = clientId;
-    query.value = rangeClause;
+    if (!range.length)
+        range = [range,
+                 range];
 
     {
         var mixAmount = Math.pow(2, shardKeyMix);
@@ -174,8 +166,51 @@ var getQuery = function(clientId, shardKeyMix, indexMix, range, sparsity)
 
         query[mixFieldNames[indexMix]] = mixRangeClause;
     }
+}
+
+var getQuery = function(clientId, shardKeyMix, indexMix, range, sparsity)
+{
+    range = toRange(range);
+    var sparsityClause = {$mod : [Math.pow(2, sparsity),
+                                  0]};
+
+    var rangeClause = sparsityClause;
+    rangeClause["$gte"] = range[0];
+    rangeClause["$lt"] = range[1];
+
+    query = {clientId : clientId,
+             value : rangeClause}
+
+    addMixClauses(query, range, shardKeyMix, indexMix);
 
     return query
+}
+
+var getUpdate = function(clientId, shardKeyMix, indexMix, value)
+{
+    value = wrap(value)
+
+    var update = {}
+    update.query = {clientId : clientId,
+                    value : value}
+
+    addMixClauses(update.query, value, shardKeyMix, indexMix);
+
+    update.update = {"$set" : {updateData : ObjectId()}};
+
+    return update;
+}
+
+var getDelete = function(clientId, shardKeyMix, indexMix, value)
+{
+    value = wrap(value)
+
+    var del = {clientId : clientId,
+               value : value}
+
+    addMixClauses(del, value, shardKeyMix, indexMix);
+
+    return del;
 }
 
 function PerfTest(coll, shardKeyMix, indexMix, queryDist, opPercents)
@@ -189,7 +224,8 @@ function PerfTest(coll, shardKeyMix, indexMix, queryDist, opPercents)
                         var maxRangeSize = 300;
 
                         if (rangeSize(maxRange) < maxRangeSize)
-                            return maxRange;
+                            return [maxRange[0],
+                                    maxRange[1]];
 
                         newRangeStart =
                                         Math
@@ -204,25 +240,35 @@ function PerfTest(coll, shardKeyMix, indexMix, queryDist, opPercents)
 
     if (!opPercents) {
         opPercents = {query : 40,
-                      insert : 20,
-                      update : 20,
-                      "delete" : 20}
+                      insert : 30,
+                      update : 5,
+                      "delete" : 5}
     }
-
+    
     var clientId = new ObjectId();
-    var maxQueryRange = [0,
-                         0];
+
+    var maxRange = [0,
+                    0];
 
     var maxUpdateRange = [0,
                           0];
 
     var maxDeleteRange = [0,
-                          0];
+                          1];
 
     ops =
-          {query : function()
+          {query : function(verbose)
            {
                var range = queryDist(maxRange);
+
+               if (range[0] % 2 != 0)
+                   range[0] = range[0] + 1;
+               if (range[1] % 2 != 0) {
+                   range[1] = range[1] - 1;
+               }
+
+               range = toRange(range);
+
                var sparse = 1;
                var query =
                            getQuery(clientId,
@@ -232,12 +278,17 @@ function PerfTest(coll, shardKeyMix, indexMix, queryDist, opPercents)
                                     sparse);
 
                var results = coll.find(query).sort({value : 1});
-
-               var nextValue = range[0];
                var numResults =
                                 Math.ceil(rangeSize(range)
                                           / Math.pow(2, sparse));
                var resultsFound = 0;
+               var nextValue = range[0];
+
+               if (verbose) {
+                   print("Querying range: " + tojson(range) + ", expecting "
+                         + numResults + " results.");
+                   // printjson(query);
+               }
 
                while (results.hasNext()) {
                    result = results.next();
@@ -248,24 +299,108 @@ function PerfTest(coll, shardKeyMix, indexMix, queryDist, opPercents)
 
                assert.eq(resultsFound, numResults);
            },
-           insert : function()
+           insert : function(verbose)
            {
+               if (verbose) {
+                   print("Inserting document with value " + maxRange[1]);
+               }
+
                var doc = getDocument(clientId, maxRange[1]);
                coll.insert(doc);
                maxRange[1]++;
            },
-           update : function()
+           update : function(verbose)
            {
-               
-           },
-           "delete" : function()
-           {
+               // Don't update unless we have docs there already
+               if (maxUpdateRange[1] >= maxRange[1] - 1)
+                   return;
 
+               if (verbose) {
+                   print("Updating document with value " + maxUpdateRange[1]);
+               }
+
+               var update =
+                            getUpdate(clientId,
+                                      shardKeyMix,
+                                      indexMix,
+                                      maxUpdateRange[1]);
+               maxUpdateRange[1] += 2;
+           },
+           "delete" : function(verbose)
+           {
+               // Don't delete unless we have docs there already
+               if (maxDeleteRange[1] >= maxRange[1] - 1)
+                   return;
+
+               if (verbose) {
+                   print("Deleting document with value " + maxDeleteRange[1]);
+               }
+
+               var del =
+                         getDelete(clientId,
+                                   shardKeyMix,
+                                   indexMix,
+                                   maxDeleteRange[1]);
+
+               maxDeleteRange[1] += 2;
            }}
+
+    var counts = {}
+    var total = 0;
 
     while (true) {
 
+        var choice = Math.floor(Random.rand() * 100);
+        var choiceFloor = 0;
+
+        for (key in opPercents) {
+            var percent = opPercents[key];
+
+            if (choice > choiceFloor + percent) {
+                choiceFloor += percent;
+                continue;
+            }
+
+            // printjson(coll.find().toArray());
+
+            ops[key](true);
+            counts[key] = (counts[key] == undefined ? 0 : counts[key] + 1);
+            total++;
+            break;
+        }
+
+        if (total % 100 == 0) {
+            jsTest.log("Current stats: " + total + " ops.");
+            printjson(counts);
+
+            printjson("Document range : " + tojson(maxRange));
+            printjson("Update range : " + tojson(maxUpdateRange));
+            printjson("Delete range : " + tojson(maxDeleteRange));
+        }
     }
 }
 
-PerfTest(5, 4)
+var st = new ShardingTest({shards : 1,
+                           mongos : 1})
+
+jsTest.log("STARTING TESTS...");
+
+var mongos = st.s;
+var coll = mongos.getCollection("foo.bar");
+
+try {
+
+    PerfTest(coll, 5, 4)
+
+} catch (e) {
+
+    printjson(e);
+    jsTest.log("ERROR!");
+
+    while (true)
+        sleep(1000);
+}
+
+jsTest.log("DONE!")
+
+st.stop();

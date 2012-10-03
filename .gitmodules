@@ -1,3 +1,6 @@
 [submodule "remote_data/chef-server/chef-repo"]
 	path = remote_data/chef-server/chef-repo
 	url = git://github.com/opscode/chef-repo.git
+[submodule "test_lib/boto"]
+	path = test_lib/boto
+	url = https://github.com/boto/boto.git
