@@ -5,7 +5,7 @@ This config file defines a cluster test, and is run via the cluster test console
 # ALL PATHS RELATIVE TO THE CONSOLE ROOT
 
 # Set binary path - this information will get uploaded to all remote servers
-BinPath('./remote_resources')
+RemoteResourcePath('./remote_resources')
 
 # Set log path - the directory in which all logs should be stored
 LogPath('/tmp/logs/')

@@ -96,6 +96,8 @@ class ProcMgrProxy(object):
         self.remote_commands = []
         self._socket = None
         self._reader = None
+                
+        print "Initializing proxy to host, available at : %s" % (self._ssh_str())
 
     def add_remote_command(self, remote_command):
         """Add remote_command that shares the same address into list.
@@ -143,8 +145,11 @@ class ProcMgrProxy(object):
         """
         # Rsync. Copy process_manager.py and all files in local bin/.
         path = 'cluster_test_%d' % self.address[1]
-        pm_path = os.path.join(os.path.dirname(__file__), 'process_manager.py')
+        
+        pm_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'base_remote_resources'))
+        
         src = [console_config._bin_path, pm_path]
+        
         # To working dir in remote machine.
         dest = "%s@%s:%s" % (self.user_name, self.address[0], path)
         if not self._rsync(src, dest):
@@ -155,9 +160,10 @@ class ProcMgrProxy(object):
         # Use SSH to run process manager.
         # nohup python process_manager.py >process_manager.out 2>&1
         # </dev/null &
-        ssh_command = (('nohup python -u process_manager.py %d '
-                        '>process_manager.out 2>&1 </dev/null &')
-                        % self.address[1])
+        ssh_command = 'cd base_remote_resources; bash restart_process_manager.sh %d' % self.address[1]
+        
+        # print ssh_command
+        
         if self._ssh(ssh_command):
             print self.address, "process manager has been set up."
         else:
@@ -172,9 +178,12 @@ class ProcMgrProxy(object):
                 to be copied.
             dest: (str) The destination.
         """
+        
+        #print(source)
+        
         # Test SSH connection.
         if not self._ssh('test 1 -eq 1', use_pwd=False):
-            print "Waiting for SSH on %s" % self.address[0]
+            print "Waiting for SSH on %s with key %s" % (self.address[0], self.key_file)
             time.sleep(1)
             while not self._ssh('test 1 -eq 1', use_pwd=False):
                 time.sleep(1)
@@ -184,19 +193,37 @@ class ProcMgrProxy(object):
 
         # Use key file
         if self.key_file:
-            ssh = 'ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i %s'
-            rsync.extend(['-e', ssh % escape(self.key_file, ' ')])
+            ssh = 'ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "%s"'
+            rsync.extend(['-e', ssh % self.key_file])
 
         if isinstance(source, list):
             rsync.extend(source)
             rsync.append(dest)
         else:
             rsync.extend([source, dest])
+        
         print 'Sync files from %s to %s...' % (source, dest)
+        
         if subprocess.call(rsync) == 0:
             return True
         else:
             return False
+
+    def _ssh_str(self):
+        """SSH shell command"""
+        
+        ssh = ['ssh',
+                '-o', 'StrictHostKeyChecking=no',
+                '-o', 'IdentitiesOnly=yes']
+        
+        cd_cmd = 'cd cluster_test_%d; ' % self.address[1]
+        
+        if self.key_file:
+            ssh.extend(['-i', "\"" + self.key_file + "\"" ])
+            
+        ssh.extend([self.user_name + '@' + self.address[0], "-t", "\"" + cd_cmd + "$SHELL\""])
+        
+        return " ".join(ssh)
 
     def _ssh(self, command, use_pwd=True):
         """Run command on remote machine.
@@ -215,6 +242,9 @@ class ProcMgrProxy(object):
         if self.key_file:
             ssh.extend(['-i', self.key_file])
         ssh.extend([self.user_name + '@' + self.address[0], cd_cmd + command])
+        
+        print(" ".join(ssh))
+        
         # Check whether ssh runs successfully.
         if subprocess.call(ssh) == 0:
             return True
@@ -250,7 +280,8 @@ class ProcMgrProxy(object):
             alias: Alias of the binary, unique in that ProcessManager.
                 Default is binary's name, "mongod" in above example.
         """
-        command_list = [process_manager.ProcessManager.RUN]
+        
+        command_list = []
         if remote_command.alias is not None:
             command_list.extend(['-as', remote_command.alias])
         if remote_command.wait:
@@ -351,17 +382,30 @@ class Console(object):
 
     def config(self, command_config_path):
         """Configure Console with a command config file."""
+        
         # Read configs
         # Run console config in console_config module.
         m = sys.modules['console_config']
+        
+        # Save the current dir
+        cwd = os.getcwd()
+                
         # Open and execute remote command config file.
         with open(command_config_path, 'r') as command_file:
             try:
+                # Reset the current path to the command file's directory
+                os.chdir(os.path.dirname(command_config_path))
+    
                 exec command_file in m.__dict__
+                        
             except Exception as e:
                 print "Error in command config file:"
                 print e
                 print traceback.format_exc()
+        
+        # Reset the path
+        os.chdir(cwd)
+        
         alias_set = set()
         self._remote_commands = []
         for c in console_config._remote_commands:
@@ -370,6 +414,7 @@ class Console(object):
             else:
                 # Duplicated command alias.
                 print 'Global duplicated alias (ignored):', c.alias, c.command
+        
         self._key_file = console_config._key_file
 
     def init_proxies(self):
@@ -381,8 +426,9 @@ class Console(object):
                 address_dict[rc.address] = ProcMgrProxy(rc.address,
                                                         rc.user_name,
                                                         self._key_file)
+            
             if not address_dict[rc.address].add_remote_command(rc):
-                print ('Duplicated alias <%s>. Remote command: %s' %
+                print ('Duplicated alias <%s>. Remote command: %s' % 
                     (rc.alias, rc.command))
         self._process_managers = address_dict.values()
 
@@ -407,7 +453,7 @@ class Console(object):
                 phases = list(s)
                 phases.sort()
                 for p in phases:
-                    print '\n', '='*20, "Current phase:", p, '='*20
+                    print '\n', '=' * 20, "Current phase:", p, '=' * 20
                     start_method = lambda pm: pm.start_run(p)
                     self.async_run_all(start_method, ProcMgrProxy.run_done)
                     if not console_config._phase_check(p):
@@ -469,7 +515,7 @@ class Console(object):
             print "Perhaps you should run 'setup' first"
         return success
 
-    def async_run_all(self, start_method, callback_method = None):
+    def async_run_all(self, start_method, callback_method=None):
         """Send commmand to all process managers and wait for response
         in any given order.
 
@@ -530,7 +576,7 @@ def escape(s, pattern=r'(\W)'):
         pattern: (str) The pattern of substring needed to be escaped.
     """
     r = re.compile(pattern)
-    return r.sub(r'\\\1', s)
+    return r.subn(r'\\\1', s)[0]
 
 def main():
     """Main function that runs console to interact with user."""

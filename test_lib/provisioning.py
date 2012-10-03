@@ -3,6 +3,8 @@
 import datetime
 import time
 import json
+import os
+import sys
 
 import boto.ec2 as ec2
 from boto.s3.connection import S3Connection
@@ -14,7 +16,7 @@ TEST_NAME_KEY = 'test_name'
 MACHINE_TYPE_KEY = 'machine_type'
 COUNTER_KEY = 'machine_counter'
 BUCKET_NAME = 'cluster-test-metadata'
-USER_DATA_FILE = 'aws_setup_host.sh'
+USER_DATA_FILE = os.path.join(os.path.dirname(__file__), 'aws_setup_host.sh')
 
 # Regions
 REGION_US_EAST_1 = "us-east-1" # N. Virginia
@@ -119,22 +121,61 @@ class ProvisioningError(Exception):
         return repr(self.msg)
 
 class AWS(object):
+    
     """Provisioning on AWS."""
     def __init__(self,
                  test_name,
-                 key_name,
-                 access_key_id = None,
-                 secret_access_key = None):
+                 key_name=None,
+                 credentials_dir=None,
+                 access_key_id=None,
+                 secret_access_key=None):
+        
         self.test_name = test_name
         self._s3_url = ('http://cluster-test-metadata.s3.amazonaws.com/'
                         + test_name)
+        
         self._key_name = key_name
         self._access_key_id = access_key_id
         self._secret_access_key = secret_access_key
+        
+        if(credentials_dir != None):
+            self.load_credentials_from_file(credentials_dir)
+        
         # Counter of instances.
         self._machine_counter = 0
         self._ts = str(datetime.datetime.now())
         self._used_regions = set()
+
+    def load_credentials_from_file(self, credentials_dir):
+        
+        access_key_file = os.path.join(credentials_dir, "access-key.apiuser")
+        secret_access_key_file = os.path.join(credentials_dir, "access-key.apikey")
+        
+        ssh_key_file = None
+        for filename in os.listdir(credentials_dir):
+            if os.path.splitext(filename)[1] == ".privatekey":
+                ssh_key_file = filename
+                break
+            
+        assert ssh_key_file
+        self._key_name = os.path.splitext(ssh_key_file)[0]
+        self._key_file = os.path.realpath(os.path.join(credentials_dir, ssh_key_file))
+        
+        with open(access_key_file, 'r') as f:
+            self._access_key_id = f.readline().strip()
+            
+        with open(secret_access_key_file, 'r') as f:
+            self._secret_access_key = f.readline().strip()
+            
+        #print(self._access_key_id)
+        #print(self._secret_access_key)
+        #print(self._key_name)
+        #print(self._key_file)
+        
+        # HACK - TODO: Make this better
+        if sys.modules["console_config"] != None:
+            sys.modules["console_config"]._key_file = self._key_file
+        
 
     def get_machines(self, options, number=1):
         """Reuse existing instances if possible or run new instances.
@@ -163,9 +204,9 @@ class AWS(object):
                 machine_counter += 1
                 matched = None
                 for instance in existing_instances:
-                    if (instance.tags.get(COUNTER_KEY) ==
+                    if (instance.tags.get(COUNTER_KEY) == 
                             str(machine_counter)):
-                        if (instance.tags.get(MACHINE_TYPE_KEY) ==
+                        if (instance.tags.get(MACHINE_TYPE_KEY) == 
                                 options.machine_type):
                             matched = instance
                             break
@@ -221,7 +262,7 @@ class AWS(object):
                        aws_access_key_id=self._access_key_id,
                        aws_secret_access_key=self._secret_access_key)
         instances = []
-        f = {'tag:'+TEST_NAME_KEY: self.test_name, 'tag:'+TAG_KEY: TAG_VALUE}
+        f = {'tag:' + TEST_NAME_KEY: self.test_name, 'tag:' + TAG_KEY: TAG_VALUE}
         for r in conn.get_all_instances(filters=f):
             for i in r.instances:
                 if i.state == 'pending' or i.state == 'running':
@@ -356,7 +397,12 @@ class AWS(object):
 
         for region in self._used_regions:
             instances = self._get_instances(region)
-            print ("Will terminate %d instance(s) in %s... " %
+            
+            if len(instances) == 0:
+                print "No instances in %s" % region
+                continue
+            
+            print ("Will terminate %d instance(s) in %s... " % 
                        (len(instances), region)),
             conn = ec2.connect_to_region(region,
                        aws_access_key_id=self._access_key_id,
@@ -402,7 +448,7 @@ class AWS(object):
         k.make_public()
         print "Set S3 content for", key
         # Generate public URL, so that self.S3_url is available.
-        k.generate_url(60*60*24*365*100, query_auth=False,
+        k.generate_url(60 * 60 * 24 * 365 * 100, query_auth=False,
                              force_http=True)
 
     def _delete_s3_content(self, key):

@@ -4,6 +4,7 @@ import datetime
 import httplib
 import json
 import time
+import os
 
 import pymongo
 
@@ -53,13 +54,13 @@ def AddWaitStaging(pm):
     cmd = "bash -c 'while [ ! -e /logs/iostat.log ]; do sleep 1; done'"
     AddCommandToProcMgr(pm, cmd, 'wait_cloud_init', phase=0, wait=True)
 
-def BinPath(path):
+def RemoteResourcePath(path):
     """Set the folder from which the binaries are sent to remote machines."""
     if not path: return
-    if path[-1] != '/':
-        path += '/'  # Send all files in bin folder, not the folder itself.
+    if path[-1] != os.sep:
+        path += os.sep  # Send all files in bin folder, not the folder itself.
     global _bin_path
-    _bin_path = path
+    _bin_path = os.path.abspath(path)
 
 def KeyFile(path):
     """Change key file."""
