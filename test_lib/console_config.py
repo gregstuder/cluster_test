@@ -20,6 +20,15 @@ _bin_path = 'bin/'
 _log_path = 'logs/'
 _phase_checkers = []
 _key_file = None
+_remote_resource_downloads = []
+_remote_binaries = {}
+_setup_scripts = {}
+
+SETUP_SCRIPT_PREFIX =\
+"""
+#!/bin/bash
+            
+"""
 
 def SetProvisioner(provisioner):
     """Provisioner setter. So that the console could know which provisioner is
@@ -51,7 +60,7 @@ def AddWaitStaging(pm):
     in MachineOptions' constructor.
     2. Using staging tools like Chef to do staging for us.
     """
-    cmd = "bash -c 'while [ ! -e /logs/iostat.log ]; do sleep 1; done'"
+    cmd = "bash -c 'while [ ! -e ./process_manager.pid ]; do sleep 1; done'"
     AddCommandToProcMgr(pm, cmd, 'wait_cloud_init', phase=0, wait=True)
 
 def RemoteResourcePath(path):
@@ -61,6 +70,16 @@ def RemoteResourcePath(path):
         path += os.sep  # Send all files in bin folder, not the folder itself.
     global _bin_path
     _bin_path = os.path.abspath(path)
+
+def RemoteResourceDownload(url, rel_path):
+    """Set a URL and target folder which downloadable are installed into"""
+    global _remote_resource_downloads
+    _remote_resource_downloads.append((url, rel_path))
+
+def RemoteBinaryPath(ex, version, arch, rel_path):
+    """Set a custom binary version installed in a particular location"""
+    global _remote_binaries
+    _remote_binaries[(ex, version, arch)] = rel_path
 
 def KeyFile(path):
     """Change key file."""
@@ -75,6 +94,15 @@ def LogPath(path):
 def AddPhaseChecker(*args):
     """Add a phase checker to global list."""
     _phase_checkers.append(PhaseChecker(*args))
+
+def AddSetupScript(pm, snippet):
+    """Add a script snippet to run on setup"""
+    global _setup_scripts
+    
+    if not pm.host in _setup_scripts:
+        _setup_scripts[pm.host] = []
+        
+    _setup_scripts[pm.host].append(snippet)
 
 def _phase_check(phase):
     """This function is a part of the run() progress. It will run after
@@ -133,10 +161,20 @@ class RemoteRunnable(object):
             and log file name.
         program: (str) The name of program used in command.
     """
-    def __init__(self, proc_mgr, alias, program):
+    def __init__(self, proc_mgr, alias, program, version=None, arch=None):
         self.proc_mgr = proc_mgr
         self.alias = alias
         self.program = program
+        self.version = version
+        self.arch = arch
+
+    def resolve_program(self):
+        global _remote_binaries
+                
+        if not (self.program, self.version, self.arch) in _remote_binaries: return self.program
+        
+        rel_path = _remote_binaries[(self.program, self.version, self.arch)]
+        return "./remote_resources/%s" % rel_path
 
     def gen_command_for_pm(self, cmd, phase, alias=None, wait=False):
         """Add command to given process manager."""
@@ -145,7 +183,7 @@ class RemoteRunnable(object):
         AddCommandToProcMgr(self.proc_mgr, cmd, alias, phase, wait=wait)
 
 
-class Mongod(RemoteRunnable):
+class MongoD(RemoteRunnable):
     """Represent a mongod instance.
 
     Attributes:
@@ -158,20 +196,21 @@ class Mongod(RemoteRunnable):
         last_phase: (int) The last phase of the mongod's commands.
     """
     def __init__(self, proc_mgr, alias, port, replset=None,
-                 is_arbiter=False, is_configsvr=False):
-        super(Mongod, self).__init__(proc_mgr, alias, 'mongod')
+                 is_arbiter=False, is_configsvr=False, version=None):
+        super(MongoD, self).__init__(proc_mgr, alias, 'mongod', version, 'x86_64')
         self.host = proc_mgr.host
         self.port = port
         self.replset = replset
         self.is_arbiter = is_arbiter
         self.is_configsvr = is_configsvr
         self.last_phase = None
+        self.version = version
 
     def gen_command(self, start_phase):
         """Generate command based on its attributes."""
         self.gen_command_for_pm('mkdir -p data/%s' % self.alias, start_phase,
-                               alias='mk_'+self.alias, wait=True)
-        cmd_list = [self.program, '--oplogSize 50', '-v'] # verbose
+                               alias='mk_' + self.alias, wait=True)
+        cmd_list = [self.resolve_program(), '--oplogSize 50', '-v'] # verbose
         cmd_list.append('--dbpath data/%s' % self.alias)
         cmd_list.append('--port %d' % self.port)
         cmd_list.append('--logpath %s.log' % self.alias)
@@ -182,7 +221,7 @@ class Mongod(RemoteRunnable):
             cmd_list.append('--configsvr')
         cmd = ' '.join(cmd_list)
         # Generate commands.
-        self.gen_command_for_pm(cmd, start_phase+1)
+        self.gen_command_for_pm(cmd, start_phase + 1)
         self.last_phase = start_phase + 1
         AddPhaseChecker(
             lambda : wait_for_connection(self.proc_mgr.host, self.port),
@@ -239,7 +278,7 @@ class Replset(object):
             # Replset initiate.
             print 'Initializing replica set %s...' % self.name,
             try:
-                conn.admin.command('replSetInitiate',  rs_config)
+                conn.admin.command('replSetInitiate', rs_config)
                 print 'done'
                 break
             except pymongo.errors.OperationFailure:
@@ -261,7 +300,7 @@ class Replset(object):
         return "%s/%s" % (self.name, members)
 
 
-class Mongos(RemoteRunnable):
+class MongoS(RemoteRunnable):
     """Represent a mongos.
 
     Attributes:
@@ -271,7 +310,7 @@ class Mongos(RemoteRunnable):
         config_servers: (array of Mongod) Config servers.
     """
     def __init__(self, proc_mgr, alias, port, config_servers):
-        super(Mongos, self).__init__(proc_mgr, alias, 'mongos')
+        super(MongoS, self).__init__(proc_mgr, alias, 'mongos')
         self.host = proc_mgr.host
         self.port = port
         self.config_servers = config_servers
@@ -365,14 +404,14 @@ class Cluster(object):
             shard.gen_command(start_phase)
         shard_phase = max([s.last_phase for s in self.shards])
         for conf in self.config_servers:
-            conf.gen_command(shard_phase+1)
+            conf.gen_command(shard_phase + 1)
 
         configsvr_phase = max([s.last_phase for s in self.config_servers])
         self.last_phase = configsvr_phase
 
         if self.mongoses:
             for m in self.mongoses:
-                m.gen_command(configsvr_phase+1)
+                m.gen_command(configsvr_phase + 1)
             mongos_phase = max([m.last_phase for m in self.mongoses])
             self.last_phase = mongos_phase
             AddPhaseChecker(self.add_shards_to_cluster, mongos_phase)
@@ -499,7 +538,7 @@ class Mongostat(RemoteRunnable):
     def gen_command(self, start_phase):
         """Generate command."""
         cmd_list = [self.program, '--host', self.target.host, '--port', str(self.target.port)]
-        if isinstance(self.target, Mongos):
+        if isinstance(self.target, MongoS):
             cmd_list.append('--discover')
         cmd_list.append(str(self.interval))
         cmd = ' '.join(cmd_list)

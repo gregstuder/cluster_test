@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 import traceback
+import tempfile
+import shutil
 
 import console_config
 
@@ -89,7 +91,7 @@ class ProcMgrProxy(object):
         callback function. We use select() to get acknowledgements in any order.
         Other methods just fire commands to process managers and return.
     """
-    def __init__(self, address, user_name, key_file=None):
+    def __init__(self, address, user_name, key_file=None, remote_resource_downloads=None):
         self.address = address
         self.user_name = user_name
         self.key_file = key_file
@@ -156,7 +158,53 @@ class ProcMgrProxy(object):
             # Rsync fails.
             print self.address, "encounters problems when synchronizing files."
             return
-
+        
+        print "Attaching downloadable resources..."
+        
+        for url, rel_path in console_config._remote_resource_downloads:
+            if not self._download(url, rel_path):
+                print self.address, "encounters problems when downloading files."
+                return
+        
+        print "Attached."
+        
+        print "Running setup scripts..."
+        
+        if self.address[0] in console_config._setup_scripts:
+            
+            setup_scripts = console_config._setup_scripts[self.address[0]]
+                
+            temp_dir = tempfile.mkdtemp();
+            
+            for i, snippet in enumerate(setup_scripts):
+                
+                filename = os.path.join(temp_dir, "snippet%d" % i)
+                
+                with open(filename, 'w') as file:
+                    
+                    file.write(console_config.SETUP_SCRIPT_PREFIX)
+                    file.write(snippet)
+                    
+            remote_snippet_dir = dest + "/base_remote_resources/scripts"
+            
+            if not self._rsync(temp_dir + os.sep, remote_snippet_dir):
+                print self.address, "encounters problems when uploading snippets."
+                return
+            
+            shutil.rmtree(temp_dir)
+            
+            # Run snippets
+            for i, snippet in enumerate(setup_scripts):
+                
+                remote_filename = "base_remote_resources/scripts/snippet%d" % i
+                
+                run_cmd = ". ./%s" % remote_filename
+                
+                if not self._ssh(run_cmd, use_tty=True, verbose=True):
+                    print self.address, "encounters problems when executing snippets."
+                    return
+        
+        
         # Use SSH to run process manager.
         # nohup python process_manager.py >process_manager.out 2>&1
         # </dev/null &
@@ -169,6 +217,31 @@ class ProcMgrProxy(object):
         else:
             print self.address, "encounters problems when running SSH."
             return
+        
+        print "Done."
+
+    def _remoteScript(self, source_script):
+        """Remotely executes a script from the local host"""
+
+        
+
+    def _download(self, url, rel_path):
+        """Downloads a file to the remote host and installs it in a particular path."""
+        
+        tmp_dir = "TMP_DIR=`mktemp -d`;"
+        wget_cmd = [ tmp_dir, "wget", "-nv", "-O", "$TMP_DIR/archive.tgz", url, ";" ]
+        wget_cmd = ' '.join(wget_cmd)
+        
+        mkdir_cmd = "mkdir -p %s ;" % ("./remote_resources/" + rel_path)
+        
+        cleandir_cmd = "rm -Rf %s/* ;" % ("./remote_resources/" + rel_path)
+        
+        untar_cmd = [ "tar", "xf", "$TMP_DIR/archive.tgz", "-C", "./remote_resources/%s" % rel_path, ";" ]
+        untar_cmd = ' '.join(untar_cmd)
+        
+        remove_cmd = "rm -Rf $TMP_DIR;"
+        
+        return self._ssh(' '.join([ wget_cmd, mkdir_cmd, cleandir_cmd, untar_cmd, remove_cmd ]), verbose=True)
 
     def _rsync(self, source, dest):
         """Copy file to/from remote machine.
@@ -225,7 +298,7 @@ class ProcMgrProxy(object):
         
         return " ".join(ssh)
 
-    def _ssh(self, command, use_pwd=True):
+    def _ssh(self, command, use_pwd=True, use_tty=False, verbose=False):
         """Run command on remote machine.
 
         Args:
@@ -237,13 +310,17 @@ class ProcMgrProxy(object):
         else:
             cd_cmd = ''
         ssh = ['ssh',
+                '-o', 'UserKnownHostsFile=/dev/null',
                 '-o', 'StrictHostKeyChecking=no',
                 '-o', 'IdentitiesOnly=yes']
         if self.key_file:
             ssh.extend(['-i', self.key_file])
+        if use_tty:
+            ssh.extend(['-t'])
+            
         ssh.extend([self.user_name + '@' + self.address[0], cd_cmd + command])
         
-        print(" ".join(ssh))
+        if verbose: print(" ".join(ssh))
         
         # Check whether ssh runs successfully.
         if subprocess.call(ssh) == 0:
