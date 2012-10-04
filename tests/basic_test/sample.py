@@ -27,7 +27,7 @@ local_mongo_path = 'mongo-%s/mongodb-linux-x86_64-%s/bin' % (local_version, loca
 LogPath('/tmp/logs/')
 
 #
-# DEFINE SERVERS TO START UP
+# PROVISIONING
 #
 
 # The first parameter is test name, which should be unique for a test. 
@@ -51,6 +51,10 @@ machines = provisioner.get_machines(options, number=6)
 
 # Setup process managers for all IPs
 pms = [ProcMgr(m) for m in machines]
+
+#
+# SETUP MACHINES
+#
 
 iostat_script = \
 """
@@ -132,6 +136,10 @@ for pm in pms:
     # Make sure setup is complete
     AddWaitStaging(pm)
 
+#
+# SETUP CLUSTER
+#
+
 rs1 = Replset('rs1')
 rs1_1 = MongoD(pms[0], 'rs1_1', 27017, version='2.0.7')
 rs1_2 = MongoD(pms[1], 'rs1_2', 27017, version='2.0.7')
@@ -166,6 +174,10 @@ for i in range(1):
 
 # The last_phase is defined only after gen_command.
 cluster.gen_command(1)
+
+#
+# SETUP BASE COLLECTION
+#
 
 shard_coll_script = \
 """
