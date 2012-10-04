@@ -450,5 +450,6 @@ def main():
     manager.start()
 
 if __name__ == '__main__':
+    os.chdir('..')
     main()
 

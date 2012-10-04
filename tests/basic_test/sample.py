@@ -15,7 +15,13 @@ for version in [ '2.0.7', '2.2.0' ]:
 # Define where certain binary versions are located
 for version in [ '2.0.7', '2.2.0', 'cluster-test' ]:
     for ex in [ 'mongod', 'mongos', 'mongo', 'mongostat', 'mongodump', 'mongorestore' ]:
-        RemoteBinaryPath(ex, version, 'x86_64', 'mongo-%s/mongodb-linux-x86_64-%s/bin/%s' % (version, version, ex))
+        
+        bin_path = 'mongo-%s/mongodb-linux-x86_64-%s/bin/%s' % (version, version, ex)
+        RemoteBinaryPath(ex, version, 'x86_64', bin_path)
+        
+local_version = '2.0.7'
+local_mongo_path = 'mongo-%s/mongodb-linux-x86_64-%s/bin' % (local_version, local_version)
+        
 
 # Set log path - the directory in which all logs should be stored
 LogPath('/tmp/logs/')
@@ -102,64 +108,81 @@ sudo /etc/init.d/munin-node start
 
 """
 
+misc_script = \
+"""
+
+echo "Setting up misc settings..."
+
+echo "if [ -f /etc/bashrc ] ; then . /etc/bashrc; fi" > ../.bashrc
+echo "export PATH=\"`pwd`/remote_resources/%s:$PATH\"" >> ../.bashrc
+
+cd ..
+rm -f .profile
+ln -s .bashrc .profile
+
+""" % (local_mongo_path)
 
 for pm in pms:
     AddSetupScript(pm, iostat_script)
     AddSetupScript(pm, limits_script)
     AddSetupScript(pm, keepalive_script)
     AddSetupScript(pm, munin_script)
+    AddSetupScript(pm, misc_script)
     
     # Make sure setup is complete
     AddWaitStaging(pm)
 
 rs1 = Replset('rs1')
-rs1_1 = MongoD(pms[0], 'rs1_1', 27017, version="2.0.7")
-rs1_2 = MongoD(pms[1], 'rs1_2', 27017)
-rs1_3 = MongoD(pms[1], 'rs1_3', 27018, is_arbiter=True)
+rs1_1 = MongoD(pms[0], 'rs1_1', 27017, version='2.0.7')
+rs1_2 = MongoD(pms[1], 'rs1_2', 27017, version='2.0.7')
+rs1_3 = MongoD(pms[1], 'rs1_3', 27018, version='2.0.7', is_arbiter=True)
 rs1.add_member(rs1_1)
 rs1.add_member(rs1_2)
 rs1.add_member(rs1_3)
 
-#pms[1].remote_exec('bash',\
-#"""
-
-# This script should be idempotent - it will run each setup of the host
-#echo 'Hello World.' >> $DISPLAY_OUTPUT
-
-#""")
-
 rs2 = Replset('rs2')
-rs2_1 = MongoD(pms[2], 'rs2_1', 27017)
-rs2_2 = MongoD(pms[3], 'rs2_2', 27017)
-rs2_3 = MongoD(pms[3], 'rs2_3', 27018, is_arbiter=True)
+rs2_1 = MongoD(pms[2], 'rs2_1', 27017, version='2.0.7')
+rs2_2 = MongoD(pms[3], 'rs2_2', 27017, version='2.0.7')
+rs2_3 = MongoD(pms[3], 'rs2_3', 27018, version='2.0.7', is_arbiter=True)
 rs2.add_member(rs2_1)
 rs2.add_member(rs2_2)
 rs2.add_member(rs2_3)
 
-config_1 = MongoD(pms[4], 'config_1', 27017, is_configsvr=True)
+config_1 = MongoD(pms[4], 'config_1', 27017, version='2.0.7', is_configsvr=True)
 cluster = Cluster()
 cluster.add_shard(rs1)
 cluster.add_shard(rs2)
 cluster.add_config_server(config_1)
 
-#
-#old_workers = []
-#
-#worker_pms = pms[5:8]
-#for i in range(30):
-#    pm = worker_pms[i % len(worker_pms)]
-#
-#    # Mongos
-#    mongos = Mongos(pm, 'mongos_%d' % i, 27017 + i, cluster.config_servers)
-#    cluster.add_mongos(mongos)
-#
-#    # Workers
-#    worker = LoadTester(pm, 'worker_%d' % i, mongos, ['test.foo', 'test.bar'],
-#                        max_load_sleep=0.1)
-#    old_workers.append(worker)
+worker_pms = [ pms[5] ]
+
+for i in range(1):
+    
+    pm = worker_pms[i % len(worker_pms)]
+
+    # Mongos
+    mongos = MongoS(pm, 'mongos_%d' % i, 27017 + i, cluster.config_servers, version='2.0.7')
+    cluster.add_mongos(mongos)
 
 # The last_phase is defined only after gen_command.
 cluster.gen_command(1)
+
+shard_coll_script = \
+"""
+
+var coll = db.getMongo().getCollection("foo.bar");
+var admin = db.getMongo().getDB("admin");
+
+print( "Enabling sharding..." )
+
+printjson( admin.runCommand({ enableSharding : coll.getDB() + "" }) )
+printjson( admin.runCommand({ shardCollection : coll + "", key : { _id : 1 } }) )
+ 
+print( "Sharding enabled." )
+
+"""
+init_shell = MongoShell(pms[5], 'shell_enable_sharding', cluster.mongoses[0], shard_coll_script, version='2.0.7')
+init_shell.gen_command(cluster.last_phase + 1)
 
 
 #

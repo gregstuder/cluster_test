@@ -178,12 +178,15 @@ class ProcMgrProxy(object):
             
             for i, snippet in enumerate(setup_scripts):
                 
-                filename = os.path.join(temp_dir, "snippet%d" % i)
+                name, snippet, lang, isFile, shouldRun = snippet
                 
-                with open(filename, 'w') as file:
-                    
-                    file.write(console_config.SETUP_SCRIPT_PREFIX)
-                    file.write(snippet)
+                filename = os.path.join(temp_dir, name)
+                
+                if not isFile :
+                    with open(filename, 'w') as file:
+                        file.write(snippet)                        
+                else:
+                    shutil.copyfile(snippet, filename)
                     
             remote_snippet_dir = dest + "/base_remote_resources/scripts"
             
@@ -196,11 +199,14 @@ class ProcMgrProxy(object):
             # Run snippets
             for i, snippet in enumerate(setup_scripts):
                 
-                remote_filename = "base_remote_resources/scripts/snippet%d" % i
+                name, snippet, lang, isFile, shouldRun = snippet
+                if not shouldRun: continue
+                
+                remote_filename = "base_remote_resources/scripts/%s" % name
                 
                 run_cmd = ". ./%s" % remote_filename
                 
-                if not self._ssh(run_cmd, use_tty=True, verbose=True):
+                if not self._ssh(run_cmd, use_tty=True):
                     print self.address, "encounters problems when executing snippets."
                     return
         
@@ -241,7 +247,7 @@ class ProcMgrProxy(object):
         
         remove_cmd = "rm -Rf $TMP_DIR;"
         
-        return self._ssh(' '.join([ wget_cmd, mkdir_cmd, cleandir_cmd, untar_cmd, remove_cmd ]), verbose=True)
+        return self._ssh(' '.join([ wget_cmd, mkdir_cmd, cleandir_cmd, untar_cmd, remove_cmd ]))
 
     def _rsync(self, source, dest):
         """Copy file to/from remote machine.
@@ -266,7 +272,7 @@ class ProcMgrProxy(object):
 
         # Use key file
         if self.key_file:
-            ssh = 'ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "%s"'
+            ssh = 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "%s"'
             rsync.extend(['-e', ssh % self.key_file])
 
         if isinstance(source, list):
@@ -358,7 +364,7 @@ class ProcMgrProxy(object):
                 Default is binary's name, "mongod" in above example.
         """
         
-        command_list = []
+        command_list = [ process_manager.ProcessManager.RUN ]
         if remote_command.alias is not None:
             command_list.extend(['-as', remote_command.alias])
         if remote_command.wait:

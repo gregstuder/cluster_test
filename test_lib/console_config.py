@@ -22,11 +22,20 @@ _phase_checkers = []
 _key_file = None
 _remote_resource_downloads = []
 _remote_binaries = {}
+_num_setup_scripts = 0
 _setup_scripts = {}
 
-SETUP_SCRIPT_PREFIX =\
+BASH_SETUP_SCRIPT_PREFIX = \
 """
 #!/bin/bash
+# Bash setup script
+            
+"""
+
+MONGOSHELL_SETUP_SCRIPT_PREFIX = \
+"""
+
+// Mongo shell script
             
 """
 
@@ -95,14 +104,31 @@ def AddPhaseChecker(*args):
     """Add a phase checker to global list."""
     _phase_checkers.append(PhaseChecker(*args))
 
-def AddSetupScript(pm, snippet):
-    """Add a script snippet to run on setup"""
+def AddRemoteScript(pm, snippet, lang, isFile=False, runAtStart=False):
+    """Add a script snippet to rsync on setup"""
     global _setup_scripts
+    global _num_setup_scripts
     
     if not pm.host in _setup_scripts:
         _setup_scripts[pm.host] = []
-        
-    _setup_scripts[pm.host].append(snippet)
+    
+    name = "snippet%d" % _num_setup_scripts
+    _num_setup_scripts = _num_setup_scripts + 1
+    
+    if not isFile:
+        if lang == 'bash':
+            snippet = BASH_SETUP_SCRIPT_PREFIX + "\n" + snippet
+            
+        if lang == 'mongoshell':
+            snippet = MONGOSHELL_SETUP_SCRIPT_PREFIX + "\n" + snippet
+    
+    _setup_scripts[pm.host].append((name, snippet, lang, isFile, runAtStart))
+    
+    return name
+
+def AddSetupScript(pm, snippet):
+    """Add a script snippet to run on setup"""
+    AddRemoteScript(pm, snippet, 'bash', False, True)
 
 def _phase_check(phase):
     """This function is a part of the run() progress. It will run after
@@ -204,7 +230,6 @@ class MongoD(RemoteRunnable):
         self.is_arbiter = is_arbiter
         self.is_configsvr = is_configsvr
         self.last_phase = None
-        self.version = version
 
     def gen_command(self, start_phase):
         """Generate command based on its attributes."""
@@ -309,8 +334,8 @@ class MongoS(RemoteRunnable):
         last_phase: (int) The last phase of the mongos's commands.
         config_servers: (array of Mongod) Config servers.
     """
-    def __init__(self, proc_mgr, alias, port, config_servers):
-        super(MongoS, self).__init__(proc_mgr, alias, 'mongos')
+    def __init__(self, proc_mgr, alias, port, config_servers, version=None):
+        super(MongoS, self).__init__(proc_mgr, alias, 'mongos', version, 'x86_64')
         self.host = proc_mgr.host
         self.port = port
         self.config_servers = config_servers
@@ -318,7 +343,7 @@ class MongoS(RemoteRunnable):
 
     def gen_command(self, start_phase):
         """Generate command based on its attributes."""
-        cmd_list = [self.program]
+        cmd_list = [self.resolve_program()]
         config_db_str = ','.join([c.host_str() for c in self.config_servers])
         cmd_list.append('--configdb %s' % config_db_str)
         cmd_list.append('--port %d' % self.port)
@@ -440,6 +465,36 @@ class Cluster(object):
                 return False
         return True
 
+class MongoShell(RemoteRunnable):
+    """Use mongo with javascript file to generate load.
+
+    Attributes:
+        mongos: (Mongos) The mongos under test.
+        sharded_collection: (array of str) Sharded collection used by tester.
+        max_load_sleep: (float) The max interval between two period of load.
+    """
+    def __init__(self, proc_mgr, alias, mongos, script, options={}, isFile=False, version=None):
+        super(MongoShell, self).__init__(proc_mgr, alias, 'mongo', version, 'x86_64')
+        self.mongos = mongos
+        self.script = script
+        self.isFile = isFile
+        self.options = options
+        self.script_name = AddRemoteScript(proc_mgr, script, 'mongoshell', isFile, False)
+                
+    def gen_command(self, start_phase):
+        """Generate command based on its attributes."""
+                
+        # Add command
+        cmd_list = [self.resolve_program()]
+        cmd_list.append(self.mongos.host_str())
+                
+        cmd_list.append('./base_remote_resources/scripts/%s' % self.script_name)
+        opt = self.options
+        eval_cmd = 'inlineOptions = %s;' % json.dumps(opt)
+        cmd_list.append('--eval %s' % console.escape(eval_cmd))
+        cmd = ' '.join(cmd_list)
+        AddCommandToProcMgr(self.proc_mgr, cmd, self.alias, start_phase)
+
 class LoadTester(RemoteRunnable):
     """Use mongo with javascript file to generate load.
 
@@ -449,8 +504,8 @@ class LoadTester(RemoteRunnable):
         max_load_sleep: (float) The max interval between two period of load.
     """
     def __init__(self, proc_mgr, alias, mongos, sharded_collection,
-                 max_load_sleep=1):
-        super(LoadTester, self).__init__(proc_mgr, alias, 'mongo')
+                 max_load_sleep=1, version=None):
+        super(LoadTester, self).__init__(proc_mgr, alias, 'mongo', version, 'x86_64')
         self.mongos = mongos
         self.sharded_collection = sharded_collection
         self.max_load_sleep = max_load_sleep
@@ -561,7 +616,8 @@ def wait_for_connection(server, port):
         while True:
             try:
                 conn = pymongo.Connection(server, port)
-            except pymongo.errors.AutoReconnect:
+            except pymongo.errors.AutoReconnect as err:
+                print "\nError: " + str(err)
                 time.sleep(1)
             else:
                 print 'done'
