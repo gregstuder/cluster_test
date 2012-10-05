@@ -7,6 +7,7 @@ import time
 import os
 
 import pymongo
+import hashlib
 
 import console
 import provisioning
@@ -20,7 +21,7 @@ _bin_path = 'bin/'
 _log_path = 'logs/'
 _phase_checkers = []
 _key_file = None
-_remote_resource_downloads = []
+_remote_resource_downloads = {}
 _remote_binaries = {}
 _num_setup_scripts = 0
 _setup_scripts = {}
@@ -80,10 +81,17 @@ def RemoteResourcePath(path):
     global _bin_path
     _bin_path = os.path.abspath(path)
 
-def RemoteResourceDownload(url, rel_path):
+def RemoteResourceDownload(url, rel_path, pm=None):
     """Set a URL and target folder which downloadable are installed into"""
     global _remote_resource_downloads
-    _remote_resource_downloads.append((url, rel_path))
+    
+    host = ""
+    if pm != None: host = pm.host
+        
+    if not host in _remote_resource_downloads:
+        _remote_resource_downloads[host] = []
+    
+    _remote_resource_downloads[host].append((url, rel_path))
 
 def RemoteBinaryPath(ex, version, arch, rel_path):
     """Set a custom binary version installed in a particular location"""
@@ -121,6 +129,10 @@ def AddRemoteScript(pm, snippet, lang, isFile=False, runAtStart=False):
             
         if lang == 'mongoshell':
             snippet = MONGOSHELL_SETUP_SCRIPT_PREFIX + "\n" + snippet
+    
+    else:
+        snippet = os.path.abspath(snippet)
+        name = name + "-" + os.path.split(snippet)[1]
     
     _setup_scripts[pm.host].append((name, snippet, lang, isFile, runAtStart))
     
@@ -480,6 +492,7 @@ class MongoShell(RemoteRunnable):
         self.isFile = isFile
         self.options = options
         self.script_name = AddRemoteScript(proc_mgr, script, 'mongoshell', isFile, False)
+        self.last_phase = None
                 
     def gen_command(self, start_phase):
         """Generate command based on its attributes."""
@@ -493,6 +506,7 @@ class MongoShell(RemoteRunnable):
         eval_cmd = 'inlineOptions = %s;' % json.dumps(opt)
         cmd_list.append('--eval %s' % console.escape(eval_cmd))
         cmd = ' '.join(cmd_list)
+        self.last_phase = start_phase
         AddCommandToProcMgr(self.proc_mgr, cmd, self.alias, start_phase)
 
 class LoadTester(RemoteRunnable):
@@ -540,17 +554,109 @@ class MMSAgent(RemoteRunnable):
         api_key: (str) API key of MMS group.
         cluster: (Cluster) The cluster under monitor.
     """
-    def __init__(self, proc_mgr, alias, api_key, cluster):
-        super(MMSAgent, self).__init__(proc_mgr, alias, 'python mms-agent/agent.py')
-        self.api_key = api_key
+    def __init__(self, proc_mgr, alias, cluster, credentials_dir):
+        
+        # TODO: Don't dl everywhere
+        RemoteResourceDownload('https://mms.10gen.com/settings/10gen-mms-agent.tar.gz', 'mms-agent', proc_mgr)
+        
+        mms_path = "./remote_resources/mms-agent/mms-agent"
+        
         # The cluster that MMS monitors.
         self._cluster = cluster
+        self.api_key = None
+        self.secret_key = None
+        self.group_id = None
+        self.load_credentials_from_file(credentials_dir)
+        
+        mms_setup = \
+"""
 
+# MMS PREREQS
+echo "Setting up MMS environment..."
+
+echo "Installing pymongo..."
+if [ -n "`command -v yum`" ]; then
+    sudo yum install -y python-devel
+    sudo yum install -y python-setuptools
+    sudo yum install -y gcc
+else
+    sudo apt-get install -y python-devel
+    sudo apt-get install -y python-setuptools
+    sudo apt-get install -y gcc
+fi
+
+sudo easy_install -U setuptools
+sudo easy_install pip
+sudo pip install pymongo      
+
+echo "Setting up mms settings..."
+
+MMS_PATH="%s"
+
+mv $MMS_PATH/settings.py $MMS_PATH/settings-empty.py
+sed 's/@API_KEY@/%s/' $MMS_PATH/settings-empty.py | sed 's/@SECRET_KEY@/%s/' > $MMS_PATH/settings.py
+
+""" % (mms_path, self.api_key, self.secret_key)
+        
+        AddSetupScript(proc_mgr, mms_setup)
+                
+        super(MMSAgent, self).__init__(proc_mgr, alias, 'python %s/agent.py' % mms_path)
+    
+    def load_credentials_from_file(self, credentials_dir):
+        
+        api_key_file = os.path.join(credentials_dir, "mms.apiuser")
+        secret_key_file = os.path.join(credentials_dir, "mms.apikey")
+        group_id_file = os.path.join(credentials_dir, "mms.groupid")
+        
+        with open(api_key_file, 'r') as f:
+            self.api_key = f.readline().strip()
+            
+        with open(secret_key_file, 'r') as f:
+            self.secret_key = f.readline().strip()
+            
+        with open(group_id_file, 'r') as f:
+            self.group_id = f.readline().strip()
+    
     def gen_command(self, start_phase):
         """Generate command."""
         cmd = self.program
         AddCommandToProcMgr(self.proc_mgr, cmd, self.alias, start_phase)
+        AddPhaseChecker(self._remove_all_hosts_from_group, start_phase)
         AddPhaseChecker(self._add_hosts_in_cluster, start_phase)
+
+    def _remove_all_hosts_from_group(self):
+        """Removes all existing hosts from an mms group"""
+        conn = httplib.HTTPSConnection("mms.10gen.com")
+        
+        request_str = "/host/v2/hosts/%s" % self.api_key
+        
+        print "Request: ", "https://mms.10gen.com%s" % request_str
+        
+        conn.request("GET", request_str)
+        
+        r = conn.getresponse()
+        
+        response = json.loads(r.read())
+        print "List hosts", response['status']
+        
+        host_list = response['hosts']
+        
+        for host_info in host_list:
+            
+            host_id = host_info['id']
+            
+            request_str = "/host/v1/delete/%s/%s" % (self.api_key, host_id)
+            
+            print "Request: ", "https://mms.10gen.com%s" % request_str
+            
+            conn.request("GET", request_str)
+            
+            r = conn.getresponse()
+            
+            response = json.loads(r.read())
+            print "Remove host (%s)" % (host_id), response['status']
+            
+        return True
 
     def _add_hosts_in_cluster(self):
         """The callback in phase check to add whole cluster into MMS."""
@@ -569,13 +675,38 @@ class MMSAgent(RemoteRunnable):
 
     def add_host(self, host, port):
         """Add host to MMS."""
-        # api_key = '3b37f6048268296c98592c48c41c5f64'
         conn = httplib.HTTPSConnection("mms.10gen.com")
+        
+        print "Request: ", "https://mms.10gen.com/host/v1/addHost/%s?hostname=%s&port=%d" % (self.api_key, host, port)
+        
         conn.request("GET", "/host/v1/addHost/%s?hostname=%s&port=%d"
                 % (self.api_key, host, port))
+                              
         r = conn.getresponse()
         response = json.loads(r.read())
         print "Add host (%s, %d)" % (host, port), response['status']
+                
+        # Used in MMS:
+        #final StringBuilder id = new StringBuilder((pHostname.length() + 31));
+        #id.append(pGroupId.toString()).append(HOST_ID_SEP).append(pHostname).append(HOST_ID_SEP).append(pPort);
+        #return CodecUtils.md5Hex(id.toString());
+        #HOST_ID_SEP == '-'
+        #       https: // mms.10gen.com / host / v1 / editHostAlias / API_KEY?hostId = XXX & userAlias = YYYY
+        
+        md5 = hashlib.md5()
+        md5.update("%s-%s-%s" % (self.group_id, host, port))
+        host_id = md5.hexdigest()
+        
+        alias = "host-%s:%s" % (host, port)
+        
+        print "Request: ", "https://mms.10gen.com/host/v1/editHostAlias/%s?hostId=%s&userAlias=%s" % (self.api_key, host_id, alias)
+        
+        conn.request("GET", "/host/v1/editHostAlias/%s?hostId=%s&userAlias=%s" % (self.api_key, host_id, alias))
+                
+        r = conn.getresponse()
+        response = json.loads(r.read())
+        print "Change host alias (%s, %d)" % (host, port), response['status']
+        
 
 
 class Mongostat(RemoteRunnable):

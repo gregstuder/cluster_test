@@ -145,6 +145,9 @@ class ProcMgrProxy(object):
         cluster machine directory 'cluster_test_<port>' and launches an
         instance of the process_manager in the background.
         """
+        
+        print '\n', '=' * 20, "SETUP HOST %s" % (self.address,), '=' * 20
+        
         # Rsync. Copy process_manager.py and all files in local bin/.
         path = 'cluster_test_%d' % self.address[1]
         
@@ -161,7 +164,14 @@ class ProcMgrProxy(object):
         
         print "Attaching downloadable resources..."
         
-        for url, rel_path in console_config._remote_resource_downloads:
+        all_dls = []
+        if "" in console_config._remote_resource_downloads:
+            all_dls.extend(console_config._remote_resource_downloads[""])
+        
+        if self.address[0] in console_config._remote_resource_downloads:
+            all_dls.extend(console_config._remote_resource_downloads[self.address[0]])
+        
+        for url, rel_path in all_dls:
             if not self._download(url, rel_path):
                 print self.address, "encounters problems when downloading files."
                 return
@@ -542,6 +552,21 @@ class Console(object):
                     if not console_config._phase_check(p):
                         print "Error in phase_check, break."
                         break
+            elif in_command == 'show':
+                # Print setup
+                print '\n', '=' * 20, "SETUP", '=' * 20
+                print "Downloads:\n", console_config._remote_resource_downloads
+                print "\nScripts:\n", console_config._setup_scripts
+                
+                # Print phases
+                phases = [(c.phase, c) for c in self._remote_commands]
+                phases.sort()
+                cur_phase = -1                
+                for p in phases:
+                    if p[0] != cur_phase:
+                        print '\n', '=' * 20, "Phase:", p[0], '=' * 20
+                        cur_phase = p[0]
+                    print p[1].alias, ":", p[1].address, p[1].command
             elif in_command == 'stop':
                 # Auto connect.
                 if not self.connect_all():

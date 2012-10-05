@@ -176,6 +176,14 @@ for i in range(1):
 cluster.gen_command(1)
 
 #
+# SETUP STATISTICS GATHERING
+#
+
+# MMS Agent
+mms = MMSAgent(pms[5], 'mms', cluster, credentials_dir="./mms")
+mms.gen_command(cluster.last_phase + 1)
+
+#
 # SETUP BASE COLLECTION
 #
 
@@ -196,6 +204,11 @@ print( "Sharding enabled." )
 init_shell = MongoShell(pms[5], 'shell_enable_sharding', cluster.mongoses[0], shard_coll_script, version='2.0.7')
 init_shell.gen_command(cluster.last_phase + 1)
 
+for i in range(0, 5):
+    
+    load_shell = MongoShell(pms[5], 'shell_start_load_%d' % i, cluster.mongoses[0], './driver.js', isFile=True, version='2.0.7')
+    load_shell.gen_command(init_shell.last_phase + 1)
+    
 
 #
 #worker_phase = cluster.last_phase + 1

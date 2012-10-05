@@ -78,6 +78,17 @@
 // altogether.
 // 
 
+var jsTest = {}
+jsTest.log = function(msg)
+{
+    print("\n\n****" + msg + "\n****\n")
+}
+
+jsTest.options = function()
+{
+    return {}
+}
+
 // Pre-calculate field names
 var mixFieldNames = [ ];
 for ( var i = 0; i < 32; i++) {
@@ -244,7 +255,7 @@ function PerfTest(coll, shardKeyMix, indexMix, queryDist, opPercents)
                       update : 5,
                       "delete" : 5}
     }
-    
+
     var clientId = new ObjectId();
 
     var maxRange = [0,
@@ -324,6 +335,7 @@ function PerfTest(coll, shardKeyMix, indexMix, queryDist, opPercents)
                                       shardKeyMix,
                                       indexMix,
                                       maxUpdateRange[1]);
+               coll.update(update.query, update.update)
                maxUpdateRange[1] += 2;
            },
            "delete" : function(verbose)
@@ -341,7 +353,7 @@ function PerfTest(coll, shardKeyMix, indexMix, queryDist, opPercents)
                                    shardKeyMix,
                                    indexMix,
                                    maxDeleteRange[1]);
-
+               coll.remove(del)
                maxDeleteRange[1] += 2;
            }}
 
@@ -380,13 +392,21 @@ function PerfTest(coll, shardKeyMix, indexMix, queryDist, opPercents)
     }
 }
 
-var st = new ShardingTest({shards : 1,
-                           mongos : 1})
+// For testing
+var isLocal = false
 
-jsTest.log("STARTING TESTS...");
+if (isLocal) {
+    var st = new ShardingTest({shards : 1,
+                               mongos : 1,
+                               nopreallocj : true})
 
-var mongos = st.s;
-var coll = mongos.getCollection("foo.bar");
+    jsTest.log("STARTING TESTS...");
+
+    var mongos = st.s;
+    db = mongos.getDB("test");
+}
+
+var coll = db.getMongo().getCollection("foo.bar");
 
 try {
 
@@ -397,10 +417,10 @@ try {
     printjson(e);
     jsTest.log("ERROR!");
 
-    while (true)
-        sleep(1000);
+    if (isLocal) {
+        while (true)
+            sleep(1000);
+    }
 }
 
 jsTest.log("DONE!")
-
-st.stop();
