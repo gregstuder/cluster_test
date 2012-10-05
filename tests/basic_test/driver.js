@@ -124,7 +124,7 @@ var getDocument = function(clientId, value)
         doc[mixFieldNames[i]] = smearOver(value, i + 1);
     }
 
-    doc._id = ObjectId();
+    doc._id = value + clientId;
     doc.clientId = clientId;
     return doc;
 }
@@ -202,7 +202,8 @@ var getUpdate = function(clientId, shardKeyMix, indexMix, value)
     value = wrap(value)
 
     var update = {}
-    update.query = {clientId : clientId,
+    update.query = {_id : value + clientId,
+                    clientId : clientId,
                     value : value}
 
     addMixClauses(update.query, value, shardKeyMix, indexMix);
@@ -216,7 +217,8 @@ var getDelete = function(clientId, shardKeyMix, indexMix, value)
 {
     value = wrap(value)
 
-    var del = {clientId : clientId,
+    var del = {_id : value + clientId,
+               clientId : clientId,
                value : value}
 
     addMixClauses(del, value, shardKeyMix, indexMix);
@@ -404,6 +406,16 @@ if (isLocal) {
 
     var mongos = st.s;
     db = mongos.getDB("test");
+
+    var coll = db.getMongo().getCollection("foo.bar");
+    var admin = db.getMongo().getDB("admin");
+
+    print("Enabling sharding...")
+
+    printjson(admin.runCommand({enableSharding : coll.getDB() + ""}))
+    printjson(admin.runCommand({shardCollection : coll + "",
+                                key : {_id : 1}}))
+
 }
 
 var coll = db.getMongo().getCollection("foo.bar");
