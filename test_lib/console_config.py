@@ -709,7 +709,7 @@ sed 's/@API_KEY@/%s/' $MMS_PATH/settings-empty.py | sed 's/@SECRET_KEY@/%s/' > $
         
 
 
-class Mongostat(RemoteRunnable):
+class MongoStat(RemoteRunnable):
     """Mongostat instance.
 
     Attributes:
@@ -717,7 +717,7 @@ class Mongostat(RemoteRunnable):
         interval: (float) The max time between two loads.
     """
     def __init__(self, proc_mgr, alias, target, interval=2):
-        super(Mongostat, self).__init__(proc_mgr, alias, 'mongostat')
+        super(MongoStat, self).__init__(proc_mgr, alias, 'mongostat')
         self.target = target
         self.interval = interval
 
