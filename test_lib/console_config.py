@@ -25,6 +25,7 @@ _remote_resource_downloads = {}
 _remote_binaries = {}
 _num_setup_scripts = 0
 _setup_scripts = {}
+_stats_server = None
 
 BASH_SETUP_SCRIPT_PREFIX = \
 """
@@ -142,6 +143,27 @@ def AddSetupScript(pm, snippet):
     """Add a script snippet to run on setup"""
     AddRemoteScript(pm, snippet, 'bash', False, True)
 
+def SetStatsServer(pm):
+    """Set the default statistics server"""
+    
+    global _stats_server
+    
+    assert _stats_server == None
+    
+    _stats_server = StatsServer(pm, 'default_stats_server', 27017)
+    _stats_server.gen_command(1)
+
+def GetNextPhase():
+    """ Gets the next unused phase """
+    
+    global _remote_commands
+    
+    last_phase = 0
+    for rc in _remote_commands:
+         if rc.phase > last_phase: last_phase = rc.phase
+
+    return last_phase + 1
+
 def _phase_check(phase):
     """This function is a part of the run() progress. It will run after
     every phase and can be override in command config file.
@@ -250,12 +272,20 @@ class MongoD(RemoteRunnable):
         cmd_list = [self.resolve_program(), '--oplogSize 50', '-v'] # verbose
         cmd_list.append('--dbpath data/%s' % self.alias)
         cmd_list.append('--port %d' % self.port)
-        cmd_list.append('--logpath %s.log' % self.alias)
+        
         # Run in replica set.
         if self.replset:
             cmd_list.append('--replSet %s' % self.replset)
         if self.is_configsvr:
             cmd_list.append('--configsvr')
+        
+        global _stats_server
+        if _stats_server != None:
+            _stats_server.add_server_client(self.proc_mgr)
+            cmd_list = _stats_server.cmd_with_syslog(self.proc_mgr, '%s.mongod.%s' % (self.alias, self.port), cmd_list)
+        else:
+            cmd_list.append('--logpath %s.log' % self.alias)
+                        
         cmd = ' '.join(cmd_list)
         # Generate commands.
         self.gen_command_for_pm(cmd, start_phase + 1)
@@ -359,8 +389,15 @@ class MongoS(RemoteRunnable):
         config_db_str = ','.join([c.host_str() for c in self.config_servers])
         cmd_list.append('--configdb %s' % config_db_str)
         cmd_list.append('--port %d' % self.port)
-        cmd_list.append('--logpath %s.log' % self.alias)
         cmd_list.append('-vv') # verbose
+        
+        global _stats_server
+        if _stats_server != None:
+            _stats_server.add_server_client(self.proc_mgr)
+            cmd_list = _stats_server.cmd_with_syslog(self.proc_mgr, '%s.mongos.%s' % (self.alias, self.port), cmd_list)
+        else:
+            cmd_list.append('--logpath %s.log' % self.alias)
+        
         cmd = ' '.join(cmd_list)
 
         self.gen_command_for_pm(cmd, start_phase)
@@ -503,8 +540,18 @@ class MongoShell(RemoteRunnable):
                 
         cmd_list.append('./base_remote_resources/scripts/%s' % self.script_name)
         opt = self.options
+        
+        global _stats_server
+        if _stats_server != None:
+            opt['statsServer'] = _stats_server.host_str()
+        
         eval_cmd = 'inlineOptions = %s;' % json.dumps(opt)
         cmd_list.append('--eval %s' % console.escape(eval_cmd))
+                        
+        if _stats_server != None:
+            _stats_server.add_server_client(self.proc_mgr)
+            cmd_list = _stats_server.cmd_with_syslog(self.proc_mgr, '%s.mongo' % self.alias, cmd_list)
+        
         cmd = ' '.join(cmd_list)
         self.last_phase = start_phase
         AddCommandToProcMgr(self.proc_mgr, cmd, self.alias, start_phase)
@@ -730,6 +777,96 @@ class MongoStat(RemoteRunnable):
         cmd = ' '.join(cmd_list)
         AddCommandToProcMgr(self.proc_mgr, cmd, self.alias, start_phase)
 
+
+class StatsServer(MongoD):
+    """rsyslog and mongodb stats server"""
+    
+    def __init__(self, proc_mgr, alias, port, version=None):
+        
+        rsyslog_setup = \
+"""
+    
+echo "Setting up rsyslogd for remote log collection..."
+    
+read -d '' LOG_SERVER_MODS <<"EOF"
+# provides support for local system logging
+$ModLoad imuxsock 
+
+# provides kernel logging support (previously done by rklogd)
+$ModLoad imklog
+
+# provides UDP syslog reception. For TCP, load imtcp.
+$ModLoad imudp
+
+# For TCP, InputServerRun 514
+$UDPServerRun 514
+
+# This one is the template to generate the log filename dynamically, depending on the client's IP address.
+$template FILENAME,"/var/log/%fromhost%/syslog.log"
+
+# Log all messages to the dynamically formed file. Now each clients log (192.168.1.2, 192.168.1.3,etc...), will be under a separate directory which is formed by the template FILENAME.
+*.* ?FILENAME
+EOF
+    
+sudo echo "$LOG_SERVER_MODS" | sudo tee -a /etc/rsyslog.conf > /dev/null    
+
+sudo service rsyslog restart
+
+"""
+        AddSetupScript(proc_mgr, rsyslog_setup)
+        super(StatsServer, self).__init__(proc_mgr, alias, port, version=version)
+        
+        self.clients = {}
+    
+    def add_server_client(self, client_pm):
+        
+        if client_pm.host in self.clients: return
+        if client_pm.host == self.proc_mgr.host: return
+        
+        client_setup = \
+"""
+
+echo "Setting up client for remote rsyslogd log collection..."
+
+read -d '' LOG_CLIENT_MODS <<"EOF"
+$ModLoad imuxsock
+
+$ModLoad imklog
+
+# Provides UDP forwarding. The IP is the server's IP address
+*.* @%s:514 
+
+# Provides TCP forwarding. But the current server runs on UDP
+# *.* @@%s:514
+EOF
+
+sudo echo "$LOG_CLIENT_MODS" | sudo tee -a /etc/rsyslog.conf > /dev/null
+
+sudo service rsyslog restart
+
+""" % (self.proc_mgr.host, self.proc_mgr.host)
+
+        AddSetupScript(client_pm, client_setup)
+        self.clients[client_pm.host] = True
+        
+        
+    def cmd_with_syslog(self, client_pm, tag, cmd_list):
+        
+        syslog_script = \
+"""
+
+# Running command via syslog
+
+"$@" | logger -t "%s" 2>&1
+
+""" % tag
+
+        syslog_script_name = AddRemoteScript(client_pm, syslog_script, 'bash')
+        
+        new_cmd_list = [ 'bash', './base_remote_resources/scripts/%s' % syslog_script_name ]
+        new_cmd_list.extend(cmd_list)
+        
+        return new_cmd_list   
 
 ########################### Global Functions ###########################
 
