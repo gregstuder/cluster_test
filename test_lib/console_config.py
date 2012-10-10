@@ -22,9 +22,11 @@ _log_path = 'logs/'
 _phase_checkers = []
 _key_file = None
 _remote_resource_downloads = {}
+_local_resource_syncs = {}
 _remote_binaries = {}
 _num_setup_scripts = 0
 _setup_scripts = {}
+
 _stats_server = None
 
 BASH_SETUP_SCRIPT_PREFIX = \
@@ -88,16 +90,51 @@ def RemoteResourceDownload(url, rel_path, pm=None):
     
     host = ""
     if pm != None: host = pm.host
-        
+    
+    # Check that we haven't already added the resource for download
+    for host in ["", host]:
+        if host in _remote_resource_downloads:
+            for dl_url, dl_rel_path in _remote_resource_downloads[host]:
+                if dl_url == url: return
+    
     if not host in _remote_resource_downloads:
         _remote_resource_downloads[host] = []
     
     _remote_resource_downloads[host].append((url, rel_path))
 
-def RemoteBinaryPath(ex, version, arch, rel_path):
+def LocalResourceSync(local_path, rel_path, pm=None, to_abs_path=True):
+    """Set a local path which local files are sync'd from"""
+    global _local_resource_syncs
+    
+    if to_abs_path:
+        local_path = os.path.abspath(local_path)
+    
+    host = ""
+    if pm != None: host = pm.host
+        
+    # Check that we haven't already added the resource for download
+    for host in ["", host]:
+        if host in _local_resource_syncs:
+            for sync_local_path, sync_rel_path in _local_resource_syncs[host]:
+                if sync_local_path == local_path: return
+    
+    if not host in _local_resource_syncs:
+        _local_resource_syncs[host] = []
+    
+    _local_resource_syncs[host].append((local_path, rel_path))
+    
+
+def RemoteBinaryPath(ex, version, arch, rel_path, pm=None):
     """Set a custom binary version installed in a particular location"""
     global _remote_binaries
-    _remote_binaries[(ex, version, arch)] = rel_path
+    
+    host = ""
+    if pm != None: host = pm.host
+        
+    if not host in _remote_binaries:
+        _remote_binaries[host] = {}
+        
+    _remote_binaries[host][(ex, version, arch)] = rel_path
 
 def KeyFile(path):
     """Change key file."""
@@ -143,14 +180,33 @@ def AddSetupScript(pm, snippet):
     """Add a script snippet to run on setup"""
     AddRemoteScript(pm, snippet, 'bash', False, True)
 
-def SetStatsServer(pm):
+def SetStatsServer(stats_script=None):
     """Set the default statistics server"""
     
     global _stats_server
     
     assert _stats_server == None
     
-    _stats_server = StatsServer(pm, 'default_stats_server', 27017)
+    global _provisioner
+    assert _provisioner != None
+    
+    # Need a different (ubuntu) machine for the gtk support
+    options = provisioning.MachineOptions(ami='ami-3c994355')
+    stats_machine = _provisioner.get_machine(options)
+    stats_pm = ProcMgr(stats_machine)
+    
+    # Stats server needs mongodb 2.0.7
+    for version in [ '2.0.7' ]:
+        
+        RemoteResourceDownload('http://downloads.mongodb.org/linux/mongodb-linux-x86_64-%s.tgz' % \
+                               version, 'mongo-%s' % version, pm=stats_pm)
+        
+    for version in [ '2.0.7' ]:
+        for ex in [ 'mongod', 'mongos', 'mongo', 'mongostat', 'mongodump', 'mongorestore' ]:
+            bin_path = 'mongo-%s/mongodb-linux-x86_64-%s/bin/%s' % (version, version, ex)
+            RemoteBinaryPath(ex, version, 'x86_64', bin_path, pm=stats_pm)
+    
+    _stats_server = StatsServer(stats_pm, 'default_stats_server', 27017, version='2.0.7', stats_script=stats_script)
     _stats_server.gen_command(1)
 
 def GetNextPhase():
@@ -230,11 +286,19 @@ class RemoteRunnable(object):
 
     def resolve_program(self):
         global _remote_binaries
-                
-        if not (self.program, self.version, self.arch) in _remote_binaries: return self.program
         
-        rel_path = _remote_binaries[(self.program, self.version, self.arch)]
-        return "./remote_resources/%s" % rel_path
+        for host in [self.proc_mgr.host, ""]:
+            
+            remote_binaries = {}
+            if host in _remote_binaries:
+                _remote_binaries = _remote_binaries[host]
+            
+            if (self.program, self.version, self.arch) in _remote_binaries:
+                rel_path = _remote_binaries[(self.program, self.version, self.arch)]
+                return "./remote_resources/%s" % rel_path
+        
+        
+        return self.program
 
     def gen_command_for_pm(self, cmd, phase, alias=None, wait=False):
         """Add command to given process manager."""
@@ -627,7 +691,7 @@ if [ -n "`command -v yum`" ]; then
     sudo yum install -y python-setuptools
     sudo yum install -y gcc
 else
-    sudo apt-get install -y python-devel
+    sudo apt-get install -y python-dev
     sudo apt-get install -y python-setuptools
     sudo apt-get install -y gcc
 fi
@@ -781,7 +845,7 @@ class MongoStat(RemoteRunnable):
 class StatsServer(MongoD):
     """rsyslog and mongodb stats server"""
     
-    def __init__(self, proc_mgr, alias, port, version=None):
+    def __init__(self, proc_mgr, alias, port, version=None, stats_script=None):
         
         rsyslog_setup = \
 """
@@ -814,8 +878,59 @@ sudo service rsyslog restart
 
 """
         AddSetupScript(proc_mgr, rsyslog_setup)
+        
+        pystats_setup = \
+"""
+
+echo "Setting up stats server for SciPy statistics..."
+
+if [ -n "`command -v yum`" ]; then
+    echo "STATS SERVER MUST BE UBUNTU FOR CORRECT X INTEGRATION..."
+else
+
+    echo "Allowing ssh X forwarding..." 
+
+    echo "Installing XAuth..."
+    sudo apt-get update
+    sudo apt-get install -y xauth
+
+    echo "X11Forwarding yes" | sudo tee -a /etc/ssh/sshd_config
+
+    sudo service ssh restart
+fi
+
+echo "Installing numpy and matplotlib..."
+if [ -n "`command -v yum`" ]; then
+    sudo yum install -y numpy
+    sudo yum install -y python-matplotlib
+else
+    sudo apt-get install -y python-numpy
+    sudo apt-get install -y python-matplotlib
+fi
+
+echo "Installing pymongo..."
+if [ -n "`command -v yum`" ]; then
+    sudo yum install -y python-devel
+    sudo yum install -y python-setuptools
+    sudo yum install -y gcc
+else
+    sudo apt-get install -y python-dev
+    sudo apt-get install -y python-setuptools
+    sudo apt-get install -y gcc
+fi
+
+sudo easy_install -U setuptools
+sudo easy_install pip
+sudo pip install pymongo
+
+"""
+        AddSetupScript(proc_mgr, pystats_setup)
+        
         super(StatsServer, self).__init__(proc_mgr, alias, port, version=version)
         
+        LocalResourceSync('./test_lib/stats', './base_remote_resources', pm=proc_mgr, to_abs_path=False)
+        
+        self.stats_script = os.path.abspath(stats_script)
         self.clients = {}
     
     def add_server_client(self, client_pm):

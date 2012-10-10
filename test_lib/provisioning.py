@@ -10,8 +10,8 @@ import boto.ec2 as ec2
 from boto.s3.connection import S3Connection
 from boto.s3.key import Key
 
-TAG_KEY = 'purpose'
-TAG_VALUE = 'cluster_test_framework'
+CLUSTER_TEST_KEY = 'purpose'
+CLUSTER_TEST_VALUE = 'cluster_test_framework'
 TEST_NAME_KEY = 'test_name'
 MACHINE_TYPE_KEY = 'machine_type'
 COUNTER_KEY = 'machine_counter'
@@ -91,6 +91,20 @@ class Machine(object):
         self.user_name = user_name
         self.machine_options = options
 
+def get_ami_user(ami):
+    
+    if ami in ['ami-3c994355']:
+        return 'ubuntu'
+        
+    else:
+        for k, v in AMI_TYPES.items():
+            for k2, v2 in AMI_TYPES[k].items():
+                if ami == v2: return 'ec2-user'
+    
+    # Make sure we know our user for the ami
+    assert False
+    return None
+
 class MachineOptions(object):
     """Abstract options about a machine.
 
@@ -101,7 +115,7 @@ class MachineOptions(object):
         staging: (boolean) Use setup bash script.
     """
     def __init__(self, machine_type=TYPE_LARGE, region=REGION_US_EAST_1,
-                 ami=None, staging=True):
+                 ami=None, staging=True, user_name=None):
         self.machine_type = machine_type
         self.region = region
         if ami is not None:
@@ -109,8 +123,22 @@ class MachineOptions(object):
         else:
             # Use default AMI.
             self.ami = AMI_TYPES[region][machine_type]
+        
+        if user_name == None:
+            self.user_name = get_ami_user(self.ami)
+        else:
+            self.user_name = user_name
+            
         self.staging = staging
-
+        
+    def add_to_reservation(self, doc):
+        doc['machine_type'] = self.machine_type
+        doc['region'] = self.region
+        doc['ami'] = self.ami
+        
+    def __hash__(self):
+        return (str(self.machine_type) + ':' + str(self.region) + ":" + str(self.ami)).__hash__() 
+    
 class ProvisioningError(Exception):
     """Error in provisioning."""
     def __init__(self, msg):
@@ -144,7 +172,10 @@ class AWS(object):
         # Counter of instances.
         self._machine_counter = 0
         self._ts = str(datetime.datetime.now())
-        self._used_regions = set()
+        
+        self._used_options = set()
+        self._all_instances = self._get_all_instances()
+        self._used_instances = {}
 
     def load_credentials_from_file(self, credentials_dir):
         
@@ -176,8 +207,10 @@ class AWS(object):
         if sys.modules["console_config"] != None:
             sys.modules["console_config"]._key_file = self._key_file
         
+    def get_machine(self, options):
+        return self.get_machines(options, number=1)[0]
 
-    def get_machines(self, options, number=1):
+    def get_machines(self, machine_options, number=1):
         """Reuse existing instances if possible or run new instances.
 
         This function is a part of the public interface of provisioner, and
@@ -191,66 +224,104 @@ class AWS(object):
         Return:
             (list of Machine) new existing machines.
         """
-        self._used_regions.add(options.region)
+        
         print "Checking existing instances on AWS..."
-        existing_instances = self._get_instances(options.region)
+        
+        existing_instances = self._get_instances(machine_options)
+            
+        used_instances = []    
+        if machine_options in self._used_instances:
+            used_instances = self._used_instances[machine_options]
+        else:
+            self._used_instances[machine_options] = used_instances
+        
+        existing_instances = \
+            [ i for i in existing_instances if i.id not in used_instances ]
+        
         ips = None
-        if existing_instances:
-            # Reuse existing instances.
-            all_matched = []
-            machine_counter = self._machine_counter
-            for i in range(number):
-                # Increase the sequence number.
-                machine_counter += 1
-                matched = None
-                for instance in existing_instances:
-                    if (instance.tags.get(COUNTER_KEY) == 
-                            str(machine_counter)):
-                        if (instance.tags.get(MACHINE_TYPE_KEY) == 
-                                options.machine_type):
-                            matched = instance
-                            break
-                        else:
-                            # Unmatched existing instance. Cannot reuse
-                            # instances.
-                            print ("Warning: There are existing AWS instances "
-                                   "with the same name, but they do not match "
-                                   "your need.")
-                            print ("You can terminate them or change the test "
-                                  "name.")
-                            raise ProvisioningError("Unmatched instances exist")
-
-                if matched is not None:
-                    all_matched.append(matched)
-                    self._machine_counter = machine_counter
-                else:
-                    break # Stop trying to reuse instances.
-
-            if len(all_matched) == number:
-                # all matched.
-                print "Using %d existing AWS instances." % number
-                all_matched = self._wait_pending_instances(options.region,
-                        all_matched)
-                self._register_instances(all_matched, options)
-                ips = [i.public_dns_name for i in all_matched]
-            elif all_matched:
-                # Some instances are satisfied but not enough.
-                # Unmatched existing instance. Cannot reuse instances.
-                print ("Warning: There are existing AWS instances "
-                       "with the same name, but they do not match "
-                       "your need.")
-                print "You can terminate them or change a test name."
-                raise ProvisioningError("Unmatched instances exist.")
-
-        if ips is None:
+        if len(existing_instances) < number:
+            
             # Get new instances from AWS.
-            instances = self._run_instances(options, number)
-            # Register instances on S3 document.
-            self._register_instances(instances, options)
-            ips = [i.public_dns_name for i in instances]
-        return [Machine(ip, 'ec2-user', options) for ip in ips]
+            new_instances = self._run_instances(machine_options, number - len(existing_instances))
+            self._register_instances(new_instances, machine_options)
+            self._all_instances.extend(new_instances)
+            
+            existing_instances.extend(new_instances)
+                
+        assert len(existing_instances) >= number
+                
+        self._wait_pending_instances(machine_options, existing_instances)
+        
+        self._used_instances[machine_options].extend(existing_instances)
+        
+        print "Now using %d instances out of %d." % \
+            (len(self._get_all_used_instances()), len(self._all_instances))
+        
+        ips = [i.public_dns_name for i in existing_instances]
+        return [Machine(ip, machine_options.user_name, machine_options) for ip in ips]
+    
+    
 
-    def _get_instances(self, region):
+    def _get_all_instances(self, group_by_region=False):
+        """ Get full set of instances used in cluster test """
+        
+        regional_instances = {}
+        
+        doc = self._get_s3_content(self.test_name)
+                        
+        
+        reservation_docs = doc['reservations'] if doc != None and 'reservations' in doc else []
+        
+        for reservation_doc in reservation_docs:
+            
+            machine_docs = reservation_doc['machines'] if 'machines' in reservation_doc else []
+            
+            for machine_doc in machine_docs:
+                
+                # DEFAULT FOR LEGACY
+                region = REGION_US_EAST_1
+                if 'region' in machine_doc: region = machine_doc['region']
+                                
+                if not region in regional_instances:
+                    regional_instances[region] = []
+                
+                regional_instances[region].append(machine_doc)
+        
+        instances = []
+        if group_by_region: instances = {}
+        
+        for region, machine_docs in regional_instances.items():
+            
+            conn = ec2.connect_to_region(region,
+                                         aws_access_key_id=self._access_key_id,
+                                         aws_secret_access_key=self._secret_access_key)
+                    
+            filters = {'tag:' + CLUSTER_TEST_KEY: CLUSTER_TEST_VALUE,
+                       'tag:' + TEST_NAME_KEY: self.test_name}
+            
+            if group_by_region: instances[region] = []
+            
+            for reservations in conn.get_all_instances(filters=filters):
+                for i in reservations.instances:
+                    if i.state == 'pending' or i.state == 'running':
+                        
+                        if group_by_region:
+                            instances[region].append(i)
+                        else:
+                            instances.append(i)
+        
+        return instances
+
+    def _get_all_used_instances(self):
+        """ Get the full set of used instances """
+        
+        used_instances = []        
+        for machine_options, instances in self._used_instances.items():
+            used_instances.extend(instances)
+            
+        return used_instances
+
+    def _get_instances(self, machine_options):
         """Get all instances used for cluster test.
 
         Parameters:
@@ -258,15 +329,22 @@ class AWS(object):
         Return:
             (list of boto.ec2.instance)
         """
-        conn = ec2.connect_to_region(region,
-                       aws_access_key_id=self._access_key_id,
-                       aws_secret_access_key=self._secret_access_key)
+                
+        conn = ec2.connect_to_region(machine_options.region,
+                                     aws_access_key_id=self._access_key_id,
+                                     aws_secret_access_key=self._secret_access_key)
+                
+        filters = {'tag:' + CLUSTER_TEST_KEY: CLUSTER_TEST_VALUE,
+                   'tag:' + TEST_NAME_KEY: self.test_name,
+                   'tag:' + MACHINE_TYPE_KEY: machine_options.machine_type,
+                   'image_id' : machine_options.ami }
+        
         instances = []
-        f = {'tag:' + TEST_NAME_KEY: self.test_name, 'tag:' + TAG_KEY: TAG_VALUE}
-        for r in conn.get_all_instances(filters=f):
-            for i in r.instances:
+        for reservations in conn.get_all_instances(filters=filters):
+            for i in reservations.instances:
                 if i.state == 'pending' or i.state == 'running':
                     instances.append(i)
+        
         return instances
 
     def _run_instances(self, machine_options, number=1):
@@ -280,8 +358,8 @@ class AWS(object):
             list of instances.
         """
         conn = ec2.connect_to_region(machine_options.region,
-                       aws_access_key_id=self._access_key_id,
-                       aws_secret_access_key=self._secret_access_key)
+                                     aws_access_key_id=self._access_key_id,
+                                     aws_secret_access_key=self._secret_access_key)
 
         # Read setup bash script.
         if machine_options.staging and USER_DATA_FILE is not None:
@@ -293,21 +371,21 @@ class AWS(object):
         print "Creating instances on AWS...(don't interrupt now)...",
 
         # Run instance on AWS.
-        reservation = conn.run_instances(
-            machine_options.ami,
-            min_count=number,
-            max_count=number,
-            key_name=self._key_name,
-            user_data=user_data,
-            instance_type=INSTANCE_TYPES[machine_options.machine_type])
+        reservation = conn.run_instances(machine_options.ami,
+                                         min_count=number,
+                                         max_count=number,
+                                         key_name=self._key_name,
+                                         user_data=user_data,
+                                         instance_type=INSTANCE_TYPES[machine_options.machine_type])
 
         # Add tags to mark the instance for cluster test use.
-        tags = {}
-        tags[TAG_KEY] = TAG_VALUE
-        tags[TEST_NAME_KEY] = self.test_name
-        tags[MACHINE_TYPE_KEY] = machine_options.machine_type
+        tags = {CLUSTER_TEST_KEY: CLUSTER_TEST_VALUE,
+                TEST_NAME_KEY: self.test_name,
+                MACHINE_TYPE_KEY: machine_options.machine_type}
+        
         ids = [i.id for i in reservation.instances]
         conn.create_tags(ids, tags)
+        
         for i in reservation.instances:
             self._machine_counter += 1
             i.add_tag(COUNTER_KEY, str(self._machine_counter))
@@ -315,14 +393,15 @@ class AWS(object):
         print "done"
 
         # Wait until instance is running.
-        instances = self._wait_pending_instances(machine_options.region,
-                reservation.instances)
+        instances = self._wait_pending_instances(machine_options,
+                                                 reservation.instances)
 
         for i in instances:
             print i.state, i.public_dns_name
+        
         return instances
 
-    def _wait_pending_instances(self, region, instances):
+    def _wait_pending_instances(self, machine_options, instances):
         """Wait until instance is running.
 
         Parameters:
@@ -331,26 +410,31 @@ class AWS(object):
         Return:
             (list of boto.ec2.instance) Instances with up-to-date status.
         """
-        conn = ec2.connect_to_region(region,
-                       aws_access_key_id=self._access_key_id,
-                       aws_secret_access_key=self._secret_access_key)
+        conn = ec2.connect_to_region(machine_options.region,
+                                     aws_access_key_id=self._access_key_id,
+                                     aws_secret_access_key=self._secret_access_key)
 
         done = False
         first_time = True
         ids = [i.id for i in instances]
+        
         while not done:
+            
             all_instances = []
             for r in conn.get_all_instances(ids):
                 all_instances.extend(r.instances)
+                
             done = all(i.state == 'running' for i in all_instances)
             if not done:
                 if first_time:
-                    print ("waiting for %d instance(s) to start..."
+                    print ("Waiting for %d instance(s) to start..."
                                 % len(ids)),
                     first_time = False
                 time.sleep(1)
+                
         if not first_time:
             print 'done'
+            
         return all_instances
 
     def _register_instances(self, instances, machine_options):
@@ -362,19 +446,25 @@ class AWS(object):
             machine_options: (MachineOptions)
                 Options of instances.
         """
+        
         reservation_doc = {}
-        reservation_doc['machine_type'] = machine_options.machine_type
-        reservation_doc['region'] = machine_options.region
+                
+        machine_options.add_to_reservation(reservation_doc)
+        
         machine_docs = []
         # Record every instance.
         for i in instances:
-            d = {}
-            d['id'] = i.id
-            d['public_dns_name'] = i.public_dns_name
-            d['counter'] = i.tags.get(COUNTER_KEY)
+            d = {'id' : i.id,
+                 'public_dns_name' : i.public_dns_name,
+                 'counter' : i.tags.get(COUNTER_KEY),
+                 'region' : machine_options.region}
+            
             machine_docs.append(d)
+                    
         reservation_doc['machines'] = machine_docs
+        
         doc = self._get_s3_content(self.test_name)
+        
         if doc is None or doc['ts'] != self._ts:
             # The first time to access the document.
             doc = {}
@@ -382,6 +472,7 @@ class AWS(object):
             doc['reservations'] = [reservation_doc]
         else:
             doc['reservations'].append(reservation_doc)
+            
         # Write to S3
         self._set_s3_content(self.test_name, doc)
         print "See %s" % self._s3_url
@@ -391,24 +482,28 @@ class AWS(object):
 
         This function is a part of the public interface of provisioner.
         """
-        if not self._used_regions:
-            print "no running instance with test name."
+        
+        regional_instances = self._get_all_instances(group_by_region=True)
+        
+        if len(regional_instances.items()) == 0:
+            print("No running instances to terminate.")
             return
-
-        for region in self._used_regions:
-            instances = self._get_instances(region)
+        
+        for region, instances in regional_instances.items():
             
             if len(instances) == 0:
-                print "No instances in %s" % region
+                print "No running instances for test in region %s." % region
                 continue
             
-            print ("Will terminate %d instance(s) in %s... " % 
-                       (len(instances), region)),
+            print ("Will terminate %d instance(s) in %s... " % (len(instances), region)),
+            
             conn = ec2.connect_to_region(region,
-                       aws_access_key_id=self._access_key_id,
-                       aws_secret_access_key=self._secret_access_key)
+                                         aws_access_key_id=self._access_key_id,
+                                         aws_secret_access_key=self._secret_access_key)
+            
             conn.terminate_instances([i.id for i in instances])
             print "done."
+        
         self._delete_s3_content(self.test_name)
 
     def _get_s3_content(self, key):

@@ -1,0 +1,1 @@
+print "Loaded 10gen Statistics module."

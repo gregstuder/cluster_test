@@ -5,7 +5,7 @@ This config file defines a cluster test, and is run via the cluster test console
 # ALL PATHS RELATIVE TO THE CONSOLE ROOT
 
 # Set resource path - this information will get uploaded to all remote servers
-RemoteResourcePath('./remote_resources')
+LocalResourceSync('./remote_resources', '.')
 
 # These downloadable resources will be attached to the remote resources at the subdirectories
 # indicated
@@ -15,7 +15,7 @@ for version in [ '2.0.7' ]:
 # Define where certain binary versions are located
 for version in [ '2.0.7' ]:
     for ex in [ 'mongod', 'mongos', 'mongo', 'mongostat', 'mongodump', 'mongorestore' ]:
-        
+
         bin_path = 'mongo-%s/mongodb-linux-x86_64-%s/bin/%s' % (version, version, ex)
         RemoteBinaryPath(ex, version, 'x86_64', bin_path)
         
@@ -48,7 +48,7 @@ SetProvisioner(provisioner)
 options = provisioning.MachineOptions()
 
 # Machines is the list of IPs of all instances.
-machines = provisioner.get_machines(options, number=5)
+machines = provisioner.get_machines(options, number=4)
 
 # Setup process managers for all IPs
 pms = [ProcMgr(m) for m in machines]
@@ -78,10 +78,10 @@ for pm in pms:
     AddWaitStaging(pm)
 
 #
-# SETUP LOGGING
+# SETUP STATISTICS
 #
 
-SetStatsServer(pms[4])
+SetStatsServer(stats_script='./stats.py')
 
 #
 # SETUP CLUSTER

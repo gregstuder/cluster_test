@@ -148,12 +148,12 @@ class ProcMgrProxy(object):
         
         print '\n', '=' * 20, "SETUP HOST %s" % (self.address,), '=' * 20
         
-        # Rsync. Copy process_manager.py and all files in local bin/.
+        # Rsync. Copy process_manager.py
         path = 'cluster_test_%d' % self.address[1]
         
         pm_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'base_remote_resources'))
         
-        src = [console_config._bin_path, pm_path]
+        src = [pm_path]
         
         # To working dir in remote machine.
         dest = "%s@%s:%s" % (self.user_name, self.address[0], path)
@@ -161,6 +161,23 @@ class ProcMgrProxy(object):
             # Rsync fails.
             print self.address, "encounters problems when synchronizing files."
             return
+        
+        print "Syncing local resources..."
+        
+        all_syncs = []
+        if "" in console_config._local_resource_syncs:
+            all_syncs.extend(console_config._local_resource_syncs[""])
+        
+        if self.address[0] in console_config._local_resource_syncs:
+            all_syncs.extend(console_config._local_resource_syncs[self.address[0]])
+        
+        for local_path, rel_path in all_syncs:
+            local_path = os.path.abspath(local_path)
+            if not self._rsync(local_path, "%s%s%s" % (dest, os.sep, rel_path)):
+                print self.address, "encounters problems when syncing local files."
+                return
+        
+        print "Sync'd."
         
         print "Attaching downloadable resources..."
         
@@ -314,7 +331,7 @@ class ProcMgrProxy(object):
         
         return " ".join(ssh)
 
-    def _ssh(self, command, use_pwd=True, use_tty=False, verbose=False):
+    def _ssh(self, command, use_pwd=True, use_tty=False, forward_x=False, verbose=False):
         """Run command on remote machine.
 
         Args:
@@ -333,6 +350,9 @@ class ProcMgrProxy(object):
             ssh.extend(['-i', self.key_file])
         if use_tty:
             ssh.extend(['-t'])
+        
+        if forward_x:
+            ssh.extend(['-Y'])
             
         ssh.extend([self.user_name + '@' + self.address[0], cd_cmd + command])
         
@@ -525,6 +545,13 @@ class Console(object):
                     (rc.alias, rc.command))
         self._process_managers = address_dict.values()
 
+    def get_proxy_for(self, proc_mgr):
+        for proxy in self._process_managers:
+            if proxy.address[0] == proc_mgr.host:
+                return proxy
+        
+        return None
+
     def run(self):
         """Lanch interactive prompt and wait for user's command."""
         while not self._done:
@@ -555,6 +582,7 @@ class Console(object):
             elif in_command == 'show':
                 # Print setup
                 print '\n', '=' * 20, "SETUP", '=' * 20
+                print "Local Resources:\n", console_config._local_resource_syncs
                 print "Downloads:\n", console_config._remote_resource_downloads
                 print "\nScripts:\n", console_config._setup_scripts
                 
@@ -590,6 +618,12 @@ class Console(object):
                         os.remove(os.path.join(log_path, f))
 
                 self.async_run_all(ProcMgrProxy.collect_log)
+            elif in_command == 'stats':
+                if console_config._stats_server:
+                    self.run_stats(console_config._stats_server)
+                else:
+                    print "No stats server specified in test script."
+            
             elif in_command == 'clean':
                 self.async_run_all(ProcMgrProxy.clean_all)
             elif in_command == 'terminate':
@@ -656,6 +690,23 @@ class Console(object):
                     if callback_method(pm):
                         active_pms.remove(pm)
 
+    def run_stats(self, stats_server):
+        
+        stats_server_proxy = self.get_proxy_for(stats_server.proc_mgr)
+        
+        assert stats_server_proxy
+        
+        stats_server_proxy._rsync(stats_server.stats_script, '%s@%s:cluster_test_%d/base_remote_resources/scripts/' % (stats_server_proxy.user_name, stats_server_proxy.address[0], stats_server_proxy.address[1]))
+        script_name = os.path.split(stats_server.stats_script)[1]
+        
+        if stats_server.stats_script != None:
+            stats_server_proxy._ssh('sudo python ./base_remote_resources/scripts/%s' % script_name, verbose=True, forward_x=True, use_tty=True)
+        else:
+            stats_server_proxy._ssh('$SHELL', verbose=True, forward_x=True, use_tty=True)
+        
+        print "Running stats!"
+        
+    
     @staticmethod
     def _print_help():
         """Print usage help."""
@@ -672,7 +723,7 @@ class Console(object):
                " command_config.")
         print
 
-
+    
 def escape(s, pattern=r'(\W)'):
     """Escape string as one argument in bash.
 
